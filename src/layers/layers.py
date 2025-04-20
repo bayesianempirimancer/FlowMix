@@ -156,18 +156,18 @@ class MixRealNVP(nn.Module):
         return y, jnp.log(jnp.sum(jnp.exp(log_prob), axis=-1)) 
 
 
-self = ParallelRealNVPNode(4, (5,5), jnp.array([False, True, False]))
-x = jnp.ones((5, 1, 3))
-params = self.init(jr.PRNGKey(0), (x, 0.0))
-y, logp = self.apply(params, (x, 0.0))
+# self = ParallelRealNVPNode(4, (5,5), jnp.array([False, True, False]))
+# x = jnp.ones((5, 1, 3))
+# params = self.init(jr.PRNGKey(0), (x, 0.0))
+# y, logp = self.apply(params, (x, 0.0))
 
-self = ParallelRealNVP(4, 3, 10, (5,5))
-x = jnp.ones((5, 1, 3))
-params = self.init(jr.PRNGKey(1), x)
-y, logp = self.apply(params, x)
+# self = ParallelRealNVP(4, 3, 10, (5,5))
+# x = jnp.ones((5, 1, 3))
+# params = self.init(jr.PRNGKey(1), x)
+# y, logp = self.apply(params, x)
 
-self = MixRealNVP(4, 3, 10, (5,5))
-x = jnp.ones((5, 1, 3))
-params = self.init(jr.PRNGKey(2), x)
-y, logp = self.apply(params, x)
+# self = MixRealNVP(4, 3, 10, (5,5))
+# x = jnp.ones((5, 1, 3))
+# params = self.init(jr.PRNGKey(2), x)
+# y, logp = self.apply(params, x)
 
