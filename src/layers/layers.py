@@ -39,18 +39,46 @@ class ParallelMLP(nn.Module):
                 x = nn.relu(x)
         return x
 
-class ParallelRealNVP(nn.Module):
-    num_units: int
-    num_parallel: int  # Number of parallel transformations
-    non_linearity: function = nn.relu  # Non-linearity to apply after each dense layer
+
+class ParallelRealNVPNode(nn.Module):
+    num_par: int  # Number of parallel transformations
+    mask: jnp.ndarray # Mask determines the dimensions that are NOT changed by the transform
 
 
-class FlowBlock(nn.Module):
-    # goal of the flow block is to parallelize the computation of the normalizing flows associated with each object
-
-    num_flows: int  # Number of independent normalizing flows
+    def setup(self):
+        # Create a mask matrix for the parallel transformations
+        mask_dims = jnp.where(self.mask)
+        self.mask_mat = jnp.eye(self.mask.shape[-1])[mask_dims]
 
     @nn.compact
     def __call__(self, inputs):
-        return None
+        x, log_det_jac = inputs
 
+        if not (x.shape[-2] == self.num_par or x.shape[-2] == 1):
+            raise ValueError(f"Input shape {x.shape} does broadcast to (..., {self.num_par}, :)")
+
+        y = x@self.mask_mat.T
+
+        s_kernel = self.param('s_kernel',jax.nn.initializers.lecun_normal(),
+                            (self.num_par, y.shape[-1]))
+        s_bias = self.param('s_bias',jax.nn.initializers.zeros,
+                          (self.num_par,))
+        
+        t_kernel = self.param('t_kernel',jax.nn.initializers.lecun_normal(),
+                            (self.num_par, y.shape[-1]))
+        t_bias = self.param('t_bias',jax.nn.initializers.zeros,
+                          (self.num_par,))
+        
+        # Compute the scale and translation parameters
+        s = jnp.sum(y * s_kernel,-1) + s_bias
+        t = jnp.sum(y* t_kernel,-1) + t_bias
+        
+        x = x*(~self.mask) + (y*jnp.exp(s[...,None]) + t[...,None])@self.mask_mat
+
+        log_det_jac += 0.0
+        return x, log_det_jac
+
+# self = ParallelRealNVPNode(4, jnp.array([False, True, True]))
+# x = jnp.ones((5, 1, 3))
+# params = self.init(jr.PRNGKey(0), (x, 0.0))
+# self.apply(params, (x, 0.0))
