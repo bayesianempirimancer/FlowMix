@@ -74,6 +74,22 @@ class ParallelRealNVPNode(nn.Module):
         x = jnp.sum(x_to_update[...,:,None]*self.update_mask_mat,-2) + x
 
         return x, log_det_jac
+    
+    def inverse(self, inputs):
+        x, log_det_jac = inputs
+
+        # Inverse transformation
+        x_static = jnp.sum(x[..., None, :] * self.static_mask_mat, -1)
+        x_to_update = jnp.sum(x[..., None, :] * self.update_mask_mat, -1)
+
+        s = self.s_mlp(x_static)
+        t = self.t_mlp(x_static)
+        log_det_jac -= jnp.sum(s, -1)
+
+        x_to_update = (x_to_update - t) * jnp.exp(-s)
+        x = jnp.sum(x_to_update[..., :, None] * self.update_mask_mat, -2) + x
+
+        return x, log_det_jac
 
 import numpyro.distributions as dists
 
@@ -97,7 +113,9 @@ class ParallelRealNVP(nn.Module):
             mask = jnp.zeros(self.dim, dtype=bool)
             for j in range(len(indices)):
                 mask = mask.at[indices[j]].set(True)    
+
             nodes.append(ParallelRealNVPNode(self.num_par, self.mlp_features, mask))
+
         self.nodes = nodes
         self.prior = dists.MultivariateNormal(jnp.zeros(self.dim), jnp.eye(self.dim))
         
@@ -107,26 +125,49 @@ class ParallelRealNVP(nn.Module):
             inputs = node(inputs)
 
         y, log_det_jac = inputs
-        return log_det_jac + self.prior.log_prob(y)
+        return y, log_det_jac + self.prior.log_prob(y)
+    
+    def inverse(self, x):
+        # Inverse transformation
+        log_det_jac = self.prior.log_prob(x)
+        inputs = (x, log_det_jac)
+        for node in reversed(self.nodes):
+            inputs = node.inverse(inputs)
+
+        return inputs        
 
 class MixRealNVP(nn.Module):
     mix_dim: int #Also equal to numbber of parallel transformations in Parallel* stuff
+    dim: int  # Number of dimensions
+    num_nodes: int  # Number of NVP nodes
     mlp_features: tuple  # hidden layer sizes for the MLPs that compute s and t
+    mask_seed: int = 88
 
     def setup(self):
-        pass
-
+        self.dists = ParallelRealNVP(self.mix_dim, self.dim, self.num_nodes, self.mlp_features, self.mask_seed)
+        self.mixing_log_probs = self.param("mixing_probs",  
+            jax.nn.initializers.normal(stddev=0.1),  (self.mix_dim,))
+        
     def __call__(self, x):   # assumes x has shape (batch, num_par, dim) or (bathc, 1, dim)
-        pass
+        y, log_prob = self.dists(x)
+        log_prob += self.mixing_log_probs
+
+        log_prob = log_prob - jnp.max(log_prob, axis=-1, keepdims=True)
+        return y, jnp.log(jnp.sum(jnp.exp(log_prob), axis=-1)) 
 
 
 self = ParallelRealNVPNode(4, (5,5), jnp.array([False, True, False]))
 x = jnp.ones((5, 1, 3))
 params = self.init(jr.PRNGKey(0), (x, 0.0))
-y = self.apply(params, (x, 0.0))
+y, logp = self.apply(params, (x, 0.0))
 
 self = ParallelRealNVP(4, 3, 10, (5,5))
 x = jnp.ones((5, 1, 3))
 params = self.init(jr.PRNGKey(1), x)
-logp = self.apply(params, x)
+y, logp = self.apply(params, x)
+
+self = MixRealNVP(4, 3, 10, (5,5))
+x = jnp.ones((5, 1, 3))
+params = self.init(jr.PRNGKey(2), x)
+y, logp = self.apply(params, x)
 
