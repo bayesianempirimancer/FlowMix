@@ -5,8 +5,9 @@ import optax
 import numpy as np
 import yaml
 from src.utils.data_utils import load_data
+from models import VAE
 
-class VAE(nn.Module):
+class FlowMix(nn.Module):
     encoder: nn.Module
     decoder: nn.Module
 

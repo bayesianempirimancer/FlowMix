@@ -45,51 +45,49 @@ class ParallelRealNVPNode(nn.Module):
 
     def setup(self):
         # Create a mask matrix for the parallel transformations
-        dim = self.mask.shape[-1]
-        mask_dims = jnp.where(~self.mask)
-        self.static_mask_mat = jnp.eye(dim)[mask_dims]
 
-        mask_dims = jnp.where(self.mask)
-        mask_dim = len(mask_dims[0])
-        self.update_mask_mat = jnp.eye(dim)[mask_dims]
-
+        mask_dim = jnp.sum(self.mask, -1)
         self.s_mlp = ParallelMLP(self.num_par, self.mlp_features + (mask_dim,))
         self.t_mlp = ParallelMLP(self.num_par, self.mlp_features + (mask_dim,))
 
-    @nn.compact
     def __call__(self, inputs):
         x, log_det_jac = inputs
 
         if not (x.shape[-2] == self.num_par or x.shape[-2] == 1):
             raise ValueError(f"Input/output shape {x.shape} does broadcast to (..., {self.num_par}, :)")
         
-        x_static = jnp.sum(x[...,None,:]*self.static_mask_mat,-1)
-        x_to_update = jnp.sum(x[...,None,:]*self.update_mask_mat, -1)
+        x_static = x[..., ~self.mask]  # Dimensions where mask is False
+        x_to_update = x[..., self.mask]  # Dimensions where mask is True
 
         s = self.s_mlp(x_static)
         t = self.t_mlp(x_static)
         log_det_jac += jnp.sum(s,-1)
 
-        x_to_update = x_to_update * (jnp.exp(s)-1.0) + t
-        x = jnp.sum(x_to_update[...,:,None]*self.update_mask_mat,-2) + x
+        x_to_update = x_to_update * jnp.exp(s) + t
+
+        # Update x recalling that the mask == True determines the dimensions that are changed by the transform
+        x = x.at[..., self.mask].set(x_to_update)
+        x = x.at[..., ~self.mask].set(x_static)
 
         return x, log_det_jac
-    
-    def inverse(self, inputs):
-        x, log_det_jac = inputs
+
+    @nn.compact
+    def inverse(self, x):
 
         # Inverse transformation
-        x_static = jnp.sum(x[..., None, :] * self.static_mask_mat, -1)
-        x_to_update = jnp.sum(x[..., None, :] * self.update_mask_mat, -1)
+        x_static = x[..., ~self.mask]  # Dimensions where mask is False
+        x_to_update = x[..., self.mask]  # Dimensions where mask is True
 
         s = self.s_mlp(x_static)
         t = self.t_mlp(x_static)
-        log_det_jac -= jnp.sum(s, -1)
 
         x_to_update = (x_to_update - t) * jnp.exp(-s)
-        x = jnp.sum(x_to_update[..., :, None] * self.update_mask_mat, -2) + x
 
-        return x, log_det_jac
+        # Update x recalling that the mask == True determines the dimensions that are changed by the transform
+        x = x.at[..., self.mask].set(x_to_update)
+        x = x.at[..., ~self.mask].set(x_static)
+
+        return x
 
 import numpyro.distributions as dists
 
@@ -127,14 +125,12 @@ class ParallelRealNVP(nn.Module):
         y, log_det_jac = inputs
         return y, log_det_jac + self.prior.log_prob(y)
     
+    @nn.compact
     def inverse(self, x):
         # Inverse transformation
-        log_det_jac = self.prior.log_prob(x)
-        inputs = (x, log_det_jac)
         for node in reversed(self.nodes):
-            inputs = node.inverse(inputs)
-
-        return inputs        
+            x = node.inverse(x)
+        return x        
 
 class MixRealNVP(nn.Module):
     mix_dim: int #Also equal to numbber of parallel transformations in Parallel* stuff
@@ -155,19 +151,26 @@ class MixRealNVP(nn.Module):
         log_prob = log_prob - jnp.max(log_prob, axis=-1, keepdims=True)
         return y, jnp.log(jnp.sum(jnp.exp(log_prob), axis=-1)) 
 
+    @nn.compact
+    def inverse(self, x):
+        # Inverse transformation
+        return self.dists.inverse(x)  
+        
 
 # self = ParallelRealNVPNode(4, (5,5), jnp.array([False, True, False]))
-# x = jnp.ones((5, 1, 3))
+# x = jnp.ones((5, 4, 3))
 # params = self.init(jr.PRNGKey(0), (x, 0.0))
 # y, logp = self.apply(params, (x, 0.0))
+# xhat = self.apply(params, y, method=self.inverse)
 
 # self = ParallelRealNVP(4, 3, 10, (5,5))
-# x = jnp.ones((5, 1, 3))
+# x = jnp.ones((5, 4, 3))
 # params = self.init(jr.PRNGKey(1), x)
 # y, logp = self.apply(params, x)
+# xhat = self.apply(params, y, method=self.inverse)
 
 # self = MixRealNVP(4, 3, 10, (5,5))
-# x = jnp.ones((5, 1, 3))
+# x = jnp.ones((5, 4, 3))
 # params = self.init(jr.PRNGKey(2), x)
 # y, logp = self.apply(params, x)
-
+# xhat = self.apply(params, y, method=self.inverse)
