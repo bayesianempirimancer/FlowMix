@@ -52,6 +52,7 @@ class ParallelRealNVPNode(nn.Module):
 
     def __call__(self, inputs):
         x, log_det_jac = inputs
+        x = jnp.broadcast_to(x, x.shape[:-2] + (self.num_par,) + x.shape[-1:])  # Broadcast to num_par
 
         if not (x.shape[-2] == self.num_par or x.shape[-2] == 1):
             raise ValueError(f"Input/output shape {x.shape} does broadcast to (..., {self.num_par}, :)")
@@ -164,7 +165,7 @@ class MixRealNVP(nn.Module):
 # xhat = self.apply(params, y, method=self.inverse)
 
 # self = ParallelRealNVP(4, 3, 10, (5,5))
-# x = jnp.ones((5, 4, 3))
+# x = jnp.ones((5, 1, 3))
 # params = self.init(jr.PRNGKey(1), x)
 # y, logp = self.apply(params, x)
 # xhat = self.apply(params, y, method=self.inverse)
