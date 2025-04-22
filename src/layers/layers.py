@@ -116,9 +116,7 @@ class ParallelRealNVP(nn.Module):
             nodes.append(ParallelRealNVPNode(self.num_par, self.mlp_features, mask))
 
         self.nodes = nodes
-        cov_diag = jr.normal(key, (self.dim,))
-        cov_diag = jnp.exp(cov_diag - jnp.mean(cov_diag))
-        self.prior = dists.MultivariateNormal(jnp.zeros(self.dim), jnp.diag(cov_diag))
+        self.prior = dists.MultivariateNormal(jnp.zeros(self.dim), jnp.eye(self.dim))
         
     def __call__(self, x):   # assumes x has shape (batch, num_par, dim) or (bathc, 1, dim)
         inputs = (x, 0.0)

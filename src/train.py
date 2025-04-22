@@ -1,6 +1,7 @@
 from flax import linen as nn
 import jax
 import jax.numpy as jnp
+import jax.random as jr
 import optax
 import numpy as np
 import yaml
@@ -37,38 +38,54 @@ from src.models import MixRealNVP
 train_data = jnp.load('datasets/triple_mnist/val_point_cloud.npy')
 train_mask = jnp.load('datasets/triple_mnist/val_point_cloud_mask.npy')
 
+key = jr.PRNGKey(11)
+
+y = train_data[:10].copy()
+y_mask = train_mask[:10].copy()
+del train_data, train_mask
+
+y = y + jr.uniform(key, y.shape)*0.5
+y = y/jnp.std(y)
+y = y - jnp.sum(y, (-3,-2), keepdims=True)/jnp.sum(y_mask, -2, keepdims=True)[...,None]
+
+y = y[:1]
+y_mask = y_mask[:1]
+
 # Initialize model
-mix_dim = 20
+mix_dim = 3
 dim = 2
-num_nodes = 6
-mlp_features = (5,5)
+num_nodes = 4
+mlp_features = (2,2,2)
 mask_seed = 88
 
 model = MixRealNVP(mix_dim, dim, num_nodes, mlp_features, mask_seed)
 # Initialize optimizer
 
 key = jax.random.PRNGKey(0)
-
-y = train_data[:10].copy()
-y_mask = train_mask[:10].copy()
-del train_data, train_mask
-
 params = model.init(key, y, y_mask)
 
-optimizer = optax.adam(learning_rate=0.001)
+optimizer = optax.adam(learning_rate=0.1)
 opt_state = optimizer.init(params)
 
+def compute_loss(params, model, y, y_mask):
+    _, log_prob = model.apply(params, y, y_mask)
+    return -log_prob.sum()  # Negative log-likelihood for minimization
+
 # Training loop
-for epoch in range(1000):
-    # Start profiling
-    _, log_prob = model(y, y_mask)
-    loss = log_prob.sum()
-    # Update parameters
-    grads = jax.grad(loss)(params)
+from matplotlib import pyplot as plt
+for epoch in range(200):
+    # Compute gradients
+    loss, grads = jax.value_and_grad(compute_loss)(params, model, y, y_mask)
+    
+    # Apply updates
     updates, opt_state = optimizer.update(grads, opt_state)
     params = optax.apply_updates(params, updates)
-
+    
     # Log training progress
     print(f'Epoch {epoch + 1}, Loss: {loss}')
 
-
+    y_hat = model.apply(params, jax.random.PRNGKey(0), y.shape[:-1], method=model.sample)
+    x_hat = model.apply(params, y, y_mask)[0]
+    plt.scatter(y_hat[0, :, 0], y_hat[0, :, 1])
+    plt.scatter(x_hat[0, :, 0], x_hat[0, :, 1])
+    plt.show()
