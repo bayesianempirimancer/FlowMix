@@ -10,9 +10,12 @@ def vbe_mix_iter(E_log_pb, log_prob, x_mask):  # assumes that log_prob.shape = (
     mix_dim = log_prob.shape[-1]
     logpz = log_prob + E_log_pb
     logpz = logpz - jnp.max(logpz, axis=-1, keepdims=True)
-    N = (nn.softmax(logpz, axis=-1)*x_mask[...,None]).sum(-2, keepdims=True)
-    alpha_0 = 0.5
+    if x_mask is not None:
+        N = (nn.softmax(logpz, axis=-1)*x_mask[...,None]).sum(-2, keepdims=True)
+    else: 
+        N = (nn.softmax(logpz, axis=-1)).sum(-2, keepdims=True)
 
+    alpha_0 = 0.5
     E_log_pb = digamma(alpha_0 + N) - digamma(mix_dim*alpha_0 + jnp.sum(N,-1, keepdims=True))  
                # shape = (sample, mix_dim)                                  
     return E_log_pb
@@ -36,7 +39,7 @@ class MixRealNVP(nn.Module):
     def setup(self):
         self.dists = ParallelRealNVP(self.mix_dim, self.dim, self.num_nodes, self.mlp_features, self.mask_seed)
         
-    def __call__(self, x, x_mask):   # assumes x has shape (batch, sample, dim) 
+    def __call__(self, x, x_mask=None):   # assumes x has shape (batch, sample, dim) 
         # Forward transformation     # and x_mask has shape (batch, sample)
         y, log_prob = self.dists(x[...,None,:])  # log_prob.shape = (batch, sample, mix_dim)
         E_log_pb = jnp.zeros(log_prob.shape[:-2] + (1,) + log_prob.shape[-1:]) # shape = batch, mix_dim
@@ -65,11 +68,16 @@ class MixRealNVP(nn.Module):
         x = jr.normal(subkey2, shape + (self.mix_dim, self.dim))
 
         return jnp.sum(self.inverse(x)*z[...,None],-2)
+    
+    def loss(self, log_prob):
+        return -jnp.sum(log_prob)
         
-# self = MixRealNVP(4, 3, 9, (5,5))
-# x = jnp.ones((2, 10, 3))
-# x_mask = jnp.ones(x.shape[:-1], dtype=bool)
-# params = self.init(jr.PRNGKey(2), x, x_mask)
-# y, logp = self.apply(params, x, x_mask)
-# xhat = self.apply(params, y, method=self.inverse)
-# y_hat = self.apply(params, jr.PRNGKey(0), x.shape[:-1], method=self.sample)
+self = MixRealNVP(4, 3, 9, (5,5))
+x = jnp.ones((2, 10, 3))
+x_mask = jnp.ones(x.shape[:-1], dtype=bool)
+params = self.init(jr.PRNGKey(2), x, x_mask)
+y, logp = self.apply(params, x, x_mask)
+xhat = self.apply(params, y, method=self.inverse)
+y_hat = self.apply(params, jr.PRNGKey(0), x.shape[:-1], method=self.sample)
+
+self.loss(self.apply(params, x, x_mask)[1])
