@@ -1,2 +1,2 @@
 from .attention import SelfAttention, CrossAttention
-from .layers import MixRealNVP
+from .layers import ParallelDense, ParallelMLP, ParallelRealNVPNode, ParallelRealNVP
