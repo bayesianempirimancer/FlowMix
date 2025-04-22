@@ -42,20 +42,24 @@ key = jr.PRNGKey(11)
 
 y = train_data[:10].copy()
 y_mask = train_mask[:10].copy()
-del train_data, train_mask
 
-y = y + jr.uniform(key, y.shape)*0.5
-y = y/jnp.std(y)
-y = y - jnp.sum(y, (-3,-2), keepdims=True)/jnp.sum(y_mask, -2, keepdims=True)[...,None]
+y = y + jr.normal(key, y.shape)*y_mask[...,None]*0.25
+
+mu = jnp.sum(y*y_mask[...,None], (-3,-2), keepdims=True)/jnp.sum(y_mask[...,None], (-3,-2), keepdims=True)
+y = y - mu
+y_std = jnp.sqrt(jnp.sum(y*y*y_mask[...,None])/jnp.sum(y_mask[...,None]))
+y = y/y_std
+
+del train_data, train_mask
 
 y = y[:1]
 y_mask = y_mask[:1]
 
 # Initialize model
-mix_dim = 3
+mix_dim = 6
 dim = 2
 num_nodes = 4
-mlp_features = (2,2,2)
+mlp_features = (10,10,10)
 mask_seed = 88
 
 model = MixRealNVP(mix_dim, dim, num_nodes, mlp_features, mask_seed)
@@ -64,7 +68,7 @@ model = MixRealNVP(mix_dim, dim, num_nodes, mlp_features, mask_seed)
 key = jax.random.PRNGKey(0)
 params = model.init(key, y, y_mask)
 
-optimizer = optax.adam(learning_rate=0.1)
+optimizer = optax.adam(learning_rate=0.04)
 opt_state = optimizer.init(params)
 
 def compute_loss(params, model, y, y_mask):
@@ -86,6 +90,6 @@ for epoch in range(200):
 
     y_hat = model.apply(params, jax.random.PRNGKey(0), y.shape[:-1], method=model.sample)
     x_hat = model.apply(params, y, y_mask)[0]
-    plt.scatter(y_hat[0, :, 0], y_hat[0, :, 1])
+    plt.scatter(y[0, :, 0], y[0, :, 1])
     plt.scatter(x_hat[0, :, 0], x_hat[0, :, 1])
     plt.show()

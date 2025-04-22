@@ -17,7 +17,7 @@ class ParallelDense(nn.Module):
 
         # Initialize the bias vector with shape (block_size, num_units)
         bias = self.param('bias',
-                          nn.initializers.zeros,
+                          nn.initializers.normal(),
                           (self.num_par, self.num_units))
 
         # Perform the parallel dense transformation
