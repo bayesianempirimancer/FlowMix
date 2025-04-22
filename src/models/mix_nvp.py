@@ -5,7 +5,7 @@ from jax.scipy.special import digamma
 from flax import linen as nn
 from src.layers import ParallelRealNVP
 
-def vb_mix_iter(E_log_pb, log_prob, x_mask):  # assumes that log_prob.shape = (sample, batch, mix_dim)
+def vbe_mix_iter(E_log_pb, log_prob, x_mask):  # assumes that log_prob.shape = (sample, batch, mix_dim)
                                               # and x_mask.shape = (sample, batch)
     mix_dim = log_prob.shape[-1]
     logpz = log_prob + E_log_pb
@@ -19,7 +19,7 @@ def vb_mix_iter(E_log_pb, log_prob, x_mask):  # assumes that log_prob.shape = (s
 
 def scan_fn(carry, _):
     E_log_pb, log_prob, x_mask = carry
-    E_log_pb = vb_mix_iter(E_log_pb, log_prob, x_mask)
+    E_log_pb = vbe_mix_iter(E_log_pb, log_prob, x_mask)
     return (E_log_pb, log_prob, x_mask), None
 
 class MixRealNVP(nn.Module):
@@ -36,9 +36,9 @@ class MixRealNVP(nn.Module):
     def setup(self):
         self.dists = ParallelRealNVP(self.mix_dim, self.dim, self.num_nodes, self.mlp_features, self.mask_seed)
         
-    def __call__(self, x, x_mask):   # assumes x has shape (batch, sample, dim) or (batch, 1, dim)
+    def __call__(self, x, x_mask):   # assumes x has shape (batch, sample, dim) 
         # Forward transformation     # and x_mask has shape (batch, sample)
-        y, log_prob = self.dists(x)  # log_prob.shape = (batch, sample, mix_dim)
+        y, log_prob = self.dists(x[...,None,:])  # log_prob.shape = (batch, sample, mix_dim)
         E_log_pb = jnp.zeros(log_prob.shape[:-2] + (1,) + log_prob.shape[-1:]) # shape = batch, mix_dim
 
         carry = (E_log_pb, log_prob, x_mask)
@@ -53,22 +53,23 @@ class MixRealNVP(nn.Module):
         return y, jnp.log(jnp.sum(jnp.exp(log_prob), axis=-1)) 
 
     @nn.compact
-    def inverse(self, x):
+    def inverse(self, y):
         # Inverse transformation
-        return self.dists.inverse(x)  
+        return self.dists.inverse(y)  
         
     @nn.compact
     def sample(self, key, shape):
         key, subkey1, subkey2 = jr.split(key,3)
-        z = jr.categorical(key = subkey1, logits=self.mixing_log_probs, shape = shape)
+        z = jr.categorical(key = subkey1, logits=jnp.zeros(self.mix_dim), shape = shape)
         z = nn.one_hot(z, self.mix_dim)
         x = jr.normal(subkey2, shape + (self.mix_dim, self.dim))
 
         return jnp.sum(self.inverse(x)*z[...,None],-2)
         
-self = MixRealNVP(4, 3, 9, (5,5))
-x = jnp.ones((2, 10, 1, 3))
-x_mask = jnp.ones(x.shape[:-2], dtype=bool)
-params = self.init(jr.PRNGKey(2), x, x_mask)
-y, logp = self.apply(params, x, x_mask)
-xhat = self.apply(params, y, method=self.inverse)
+# self = MixRealNVP(4, 3, 9, (5,5))
+# x = jnp.ones((2, 10, 3))
+# x_mask = jnp.ones(x.shape[:-1], dtype=bool)
+# params = self.init(jr.PRNGKey(2), x, x_mask)
+# y, logp = self.apply(params, x, x_mask)
+# xhat = self.apply(params, y, method=self.inverse)
+# y_hat = self.apply(params, jr.PRNGKey(0), x.shape[:-1], method=self.sample)
