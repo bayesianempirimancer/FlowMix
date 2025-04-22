@@ -2,12 +2,14 @@ import jax.numpy as jnp
 import jax.random as jr
 import jax
 
-def image_tensor_to_point_cloud(image_tensor, save_fname=None):
-    image_tensor = image_tensor.sum(-1)  # Convert to grayscale
-    image_tensor = image_tensor / 255.0/3.0  # Normalize to [0, 1]
-    image_tensor = jnp.clip(image_tensor, 0, 1)  # Ensure values are in [0, 1]
+jax.default_device = 'cpu'
 
-    image_tensor = image_tensor > 0.2  # Binarize the image
+def image_tensor_to_point_cloud(image_tensor, fname=None):
+    image_tensor = image_tensor.sum(-1)  # Convert to grayscale
+    image_tensor = image_tensor > 255.0*3.0*0.1  # Normalize to [0, 1]
+#    image_tensor = jnp.clip(image_tensor, 0, 1)  # Ensure values are in [0, 1]
+#    image_tensor = image_tensor > 0.2  # Binarize the image
+
     image_indices, y_coords, x_coords = jnp.where(image_tensor)
 
     # Stack the coordinates into a single array of shape (num_points, 3)
@@ -38,10 +40,26 @@ def image_tensor_to_point_cloud(image_tensor, save_fname=None):
         point_cloud_mask = point_cloud_mask.at[i, :jnp.sum(mask)].set(True)
 
     # Save the point cloud
-    if save_fname is not None:
-        jnp.save(save_fname+'_point_cloud.npy', point_cloud)
-        jnp.save(save_fname+'_point_cloud_mask.npy', point_cloud)
+    if fname is not None:
+        jnp.save(fname+'_point_cloud.npy', point_cloud)
+        jnp.save(fname+'_point_cloud_mask.npy', point_cloud_mask)
 
     return point_cloud, point_cloud_mask
+
+# fname = 'datasets/triple_mnist/triple_mnist_train_data.npy'
+# image_tensor = jnp.load(fname)
+# fname = 'datasets/triple_mnist/train'
+# image_tensor_to_point_cloud(image_tensor, save_fname=fname)
+
+# fname = 'datasets/triple_mnist/triple_mnist_test_data.npy'
+# image_tensor = jnp.load(fname)
+# fname = 'datasets/triple_mnist/test'
+# image_tensor_to_point_cloud(image_tensor, save_fname=fname)
+
+fname = 'datasets/triple_mnist/triple_mnist_val_data.npy'
+image_tensor = jnp.load(fname)
+fname = 'datasets/triple_mnist/val'
+image_tensor_to_point_cloud(image_tensor, save_fname=fname)
+
 
 

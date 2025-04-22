@@ -68,16 +68,17 @@ class MixRealNVP(nn.Module):
         x = jr.normal(subkey2, shape + (self.mix_dim, self.dim))
 
         return jnp.sum(self.inverse(x)*z[...,None],-2)
-    
-    def loss(self, log_prob):
+
+    @staticmethod
+    def loss(log_prob):
         return -jnp.sum(log_prob)
         
-self = MixRealNVP(4, 3, 9, (5,5))
-x = jnp.ones((2, 10, 3))
+self = MixRealNVP(4, 2, 9, (5,5))
+x = jnp.ones((2, 10, 2))
 x_mask = jnp.ones(x.shape[:-1], dtype=bool)
 params = self.init(jr.PRNGKey(2), x, x_mask)
 y, logp = self.apply(params, x, x_mask)
 xhat = self.apply(params, y, method=self.inverse)
 y_hat = self.apply(params, jr.PRNGKey(0), x.shape[:-1], method=self.sample)
 
-self.loss(self.apply(params, x, x_mask)[1])
+# self.loss(self.apply(params, x, x_mask)[1])

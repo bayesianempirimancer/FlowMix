@@ -108,7 +108,7 @@ class ParallelRealNVP(nn.Module):
         nodes = []
         for i in range(self.num_nodes):
             key, subkey1, subkey2 = jr.split(key,3)
-            indices = jr.permutation(subkey2, jnp.arange(self.dim))[:self.dim//2 + jr.bernoulli(subkey1, 0.5)]
+            indices = jr.permutation(subkey2, jnp.arange(self.dim))[:self.dim//2 + jnp.mod(self.dim,2)*jr.bernoulli(subkey1, 0.5)]
             mask = jnp.zeros(self.dim, dtype=bool)
             for j in range(len(indices)):
                 mask = mask.at[indices[j]].set(True)    
