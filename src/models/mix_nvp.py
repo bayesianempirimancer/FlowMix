@@ -1,9 +1,19 @@
 import jax.numpy as jnp
 import jax.random as jr
 from jax import lax
-from jax.scipy.special import digamma
+from jax.scipy.special import digamma, gammaln
 from flax import linen as nn
 from src.layers import ParallelRealNVP
+
+def KL_Dirichlet(alpha_0, alpha_1):
+    alpha_0_sum = jnp.sum(alpha_0, axis=-1, keepdims=True)
+    alpha_1_sum = jnp.sum(alpha_1, axis=-1, keepdims=True)
+
+    term1 = gammaln(alpha_0_sum) - gammaln(alpha_1_sum)
+    term2 = jnp.sum(gammaln(alpha_1) - gammaln(alpha_0), axis=-1)
+    term3 = jnp.sum((alpha_0 - alpha_1) * (digamma(alpha_0) - digamma(alpha_0_sum)), axis=-1)
+
+    return term1 + term2 + term3
 
 def vbe_mix_iter(E_log_pb, log_prob, x_mask):  # assumes that log_prob.shape = (sample, batch, mix_dim)
                                               # and x_mask.shape = (sample, batch)
@@ -45,15 +55,24 @@ class MixRealNVP(nn.Module):
         E_log_pb = jnp.zeros(log_prob.shape[:-2] + (1,) + log_prob.shape[-1:]) # shape = batch, mix_dim
 
         carry = (E_log_pb, log_prob, x_mask)
-        carry, _ = lax.scan(scan_fn, carry, None, length=5)
+        carry, _ = lax.scan(scan_fn, carry, None, length=1)
         E_log_pb, log_prob, x_mask = carry
+
+        #### MISSING FREE ENERGY ADJUSTMENT VIA LOGZ
+        if x_mask is None:
+            N = (nn.softmax(E_log_pb, axis=-1)).sum(-2, keepdims=True)
+        else:
+            N = (nn.softmax(E_log_pb, axis=-1)*x_mask[...,None]).sum(-2, keepdims=True)
+
+        alpha_0 = 0.5
+        KL = KL_Dirichlet(alpha_0 + N, alpha_0*jnp.ones(N.shape[-1:]))
 
         # for i in range(5):
         #     E_log_pb, _ = vb_iter(E_log_pb, log_prob)
 
         log_prob += E_log_pb
         log_prob = log_prob - jnp.max(log_prob, axis=-1, keepdims=True)
-        return y, jnp.log(jnp.sum(jnp.exp(log_prob), axis=-1)) 
+        return y, jnp.log(jnp.sum(jnp.exp(log_prob), axis=-1)) - KL
 
     @nn.compact
     def inverse(self, y):
@@ -73,12 +92,12 @@ class MixRealNVP(nn.Module):
     def loss(log_prob):
         return -jnp.sum(log_prob)
         
-self = MixRealNVP(4, 2, 9, (5,5))
-x = jnp.ones((2, 10, 2))
-x_mask = jnp.ones(x.shape[:-1], dtype=bool)
-params = self.init(jr.PRNGKey(2), x, x_mask)
-y, logp = self.apply(params, x, x_mask)
-xhat = self.apply(params, y, method=self.inverse)
-y_hat = self.apply(params, jr.PRNGKey(0), x.shape[:-1], method=self.sample)
+# self = MixRealNVP(4, 2, 9, (5,5))
+# x = jnp.ones((2, 10, 2))
+# x_mask = jnp.ones(x.shape[:-1], dtype=bool)
+# params = self.init(jr.PRNGKey(2), x, x_mask)
+# y, logp = self.apply(params, x, x_mask)
+# xhat = self.apply(params, y, method=self.inverse)
+# y_hat = self.apply(params, jr.PRNGKey(0), x.shape[:-1], method=self.sample)
 
 # self.loss(self.apply(params, x, x_mask)[1])
