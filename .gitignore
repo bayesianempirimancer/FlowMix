@@ -45,7 +45,8 @@ ENV/
 *.pt
 
 # Data files (adjust as needed)
-data/
+# Only ignore root-level data directory, not src/data (which contains scripts)
+/data/
 *.h5
 *.hdf5
 *.pkl
