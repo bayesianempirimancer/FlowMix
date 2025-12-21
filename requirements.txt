@@ -1,9 +1,0 @@
-Flax==0.5.1
-jax==0.4.6
-jaxlib==0.4.6
-numpy==1.23.5
-scipy==1.10.1
-matplotlib==3.6.2
-pyyaml==6.0
-tensorflow-probability==0.19.0
-optax==0.1.3
