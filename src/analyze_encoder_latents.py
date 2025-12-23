@@ -13,12 +13,11 @@ import jax.numpy as jnp
 import numpy as np
 import pickle
 from pathlib import Path
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 import tensorflow_datasets as tfds
-from sklearn.manifold import TSNE
 
 from src.models.mnist_flow_2d import MnistFlow2D, PredictionTarget
+from src.plotting import create_tsne_plot
 
 
 def load_model_and_checkpoint(checkpoint_path):
@@ -178,40 +177,6 @@ def compute_statistics(z_all, labels):
     return z_mean_overall, z_var_overall, digit_stats
 
 
-def create_tsne_plot(z_all, labels, output_path):
-    """Create t-SNE visualization colored by digit identity."""
-    print(f"\nComputing t-SNE embedding...")
-    
-    # Compute t-SNE
-    tsne = TSNE(n_components=2, random_state=42, perplexity=30, max_iter=1000)
-    z_2d = tsne.fit_transform(z_all)
-    
-    print(f"t-SNE embedding shape: {z_2d.shape}")
-    
-    # Create plot
-    fig, ax = plt.subplots(figsize=(12, 10))
-    
-    # Color map for digits
-    colors = plt.cm.tab10(np.linspace(0, 1, 10))
-    
-    for digit in range(10):
-        digit_mask = labels == digit
-        if np.any(digit_mask):
-            ax.scatter(z_2d[digit_mask, 0], z_2d[digit_mask, 1], 
-                      c=[colors[digit]], label=f'Digit {digit}', 
-                      alpha=0.6, s=10)
-    
-    ax.set_xlabel('t-SNE Dimension 1', fontsize=12)
-    ax.set_ylabel('t-SNE Dimension 2', fontsize=12)
-    ax.set_title('t-SNE Visualization of Encoder Latent Codes\n(Colored by Digit Identity)', 
-                 fontsize=14, fontweight='bold')
-    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=1)
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"Saved t-SNE plot to {output_path}")
-    plt.close()
 
 
 def main():
@@ -221,7 +186,7 @@ def main():
     sys.path.append(os.path.abspath('.'))
     
     # Configuration
-    checkpoint_path = Path("artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_squash/final_model.pkl")
+    checkpoint_path = Path("artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_squash_momentum_default/final_model.pkl")
     
     # Check if checkpoint exists
     if not checkpoint_path.exists():
@@ -237,11 +202,25 @@ def main():
     # Load model
     model, params = load_model_and_checkpoint(checkpoint_path)
     
-    # Load all data for overall statistics
-    X_all, labels_all = load_mnist_data_with_labels(use_test_only=False)
+    # Load all data once (more efficient than loading twice)
+    # Use same split as training script: train_split=0.9, seed=42
+    X_all, labels_all = load_mnist_data_with_labels(dataset_path="data/mnist_2d_single.npz", train_split=0.9, seed=42, use_test_only=False)
     
-    # Load test set only for t-SNE
-    X_test, labels_test = load_mnist_data_with_labels(use_test_only=True)
+    # Split into train/test for t-SNE (use test set only for visualization)
+    # Match the split used in training script
+    train_split = 0.9
+    seed = 42
+    n = len(X_all)
+    n_train = int(n * train_split)
+    
+    # Use same shuffling as training script for consistent split
+    rng = np.random.RandomState(seed)
+    indices = np.arange(n)
+    rng.shuffle(indices)
+    test_indices = indices[n_train:]
+    
+    X_test = X_all[test_indices]
+    labels_test = labels_all[test_indices]
     
     # Encode all samples for overall statistics
     print("\nEncoding all samples for overall statistics...")

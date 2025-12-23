@@ -43,7 +43,7 @@ def knn_graph(x: jnp.ndarray, k: int, exclude_self: bool = True) -> jnp.ndarray:
     return indices
 
 
-class ModernEdgeConv(nn.Module):
+class EdgeConv(nn.Module):
     """
     Modern Edge Convolution layer with attention and better aggregation.
     """
@@ -162,7 +162,7 @@ class DGCNN(nn.Module):
         
         # Stack EdgeConv layers with residual connections
         for i in range(self.num_layers):
-            h_new = ModernEdgeConv(
+            h_new = EdgeConv(
                 out_dim=self.embed_dim,
                 k=self.k,
                 aggregation=self.aggregation,

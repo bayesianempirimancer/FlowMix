@@ -9,13 +9,14 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from pathlib import Path
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 import pickle
 import os
+import sys
 
 from src.models.mnist_flow_2d import MnistFlow2D, PredictionTarget
 from src.utils.training import chamfer_distance
+from src.plotting import plot_samples, plot_unconditional_samples, plot_loss_trajectory
 
 
 def create_grid_mask(x: jnp.ndarray, key: jax.random.PRNGKey, 
@@ -39,11 +40,12 @@ def create_grid_mask(x: jnp.ndarray, key: jax.random.PRNGKey,
     x_min = jnp.min(x, axis=1, keepdims=True)  # (B, 1, 2)
     x_max = jnp.max(x, axis=1, keepdims=True)  # (B, 1, 2)
     
-    # Determine which grid cells to mask (same mask for all batches in this call)
+    # Determine which grid cells to mask (different pattern for each batch element)
     key, k_mask = jax.random.split(key)
-    # Sample mask for each grid cell: (grid_size, grid_size)
+    # Sample mask for each grid cell per batch element: (B, grid_size, grid_size)
     # True means the cell should be masked
-    grid_mask = jax.random.bernoulli(k_mask, mask_prob, (grid_size, grid_size))
+    # Each batch element gets its own independent grid pattern
+    grid_mask = jax.random.bernoulli(k_mask, mask_prob, (B, grid_size, grid_size))
     
     # For each point, determine which grid cell it belongs to
     # Normalize points to [0, 1] range per batch
@@ -57,17 +59,16 @@ def create_grid_mask(x: jnp.ndarray, key: jax.random.PRNGKey,
     grid_x = jnp.clip(grid_x, 0, grid_size - 1)
     grid_y = jnp.clip(grid_y, 0, grid_size - 1)
     
-    # Look up mask value for each point's grid cell using advanced indexing
-    # grid_mask[grid_y, grid_x] - but we need to handle batched indexing
-    # Flatten indices: grid_y * grid_size + grid_x
-    flat_indices = grid_y * grid_size + grid_x  # (B, N)
+    # Look up mask value for each point's grid cell using batched indexing
+    # grid_mask has shape (B, grid_size, grid_size)
+    # grid_y and grid_x have shape (B, N)
+    # We need to index grid_mask[b, grid_y[b, i], grid_x[b, i]] for each b and i
     
-    # Flatten grid_mask and index into it
-    grid_mask_flat = grid_mask.flatten()  # (grid_size * grid_size,)
+    # Create batch indices for each point
+    batch_idx = jnp.broadcast_to(jnp.arange(B)[:, None], (B, N))  # (B, N)
     
-    # Index: for each point, get the mask value for its grid cell
-    # Use gather: grid_mask_flat[flat_indices]
-    point_mask = grid_mask_flat[flat_indices]  # (B, N) - True if cell is masked
+    # Use advanced indexing: grid_mask[batch_idx, grid_y, grid_x]
+    point_mask = grid_mask[batch_idx, grid_y, grid_x]  # (B, N) - True if cell is masked
     
     # Invert: True means visible (not masked), False means masked
     point_mask = ~point_mask  # True = visible, False = masked
@@ -75,12 +76,14 @@ def create_grid_mask(x: jnp.ndarray, key: jax.random.PRNGKey,
     return point_mask
 
 
-def load_all_digits_data(dataset_path="data/mnist_2d_full_dataset.npz", max_samples=None, seed=42):
+def load_all_digits_data(dataset_path="data/mnist_2d_single.npz", max_samples=None, seed=42):
     """
     Load all MNIST digits point cloud dataset.
     
+    Optimized for fast loading - directly loads .npz files without extra overhead.
+    
     Args:
-        dataset_path: Path to the full MNIST dataset file
+        dataset_path: Path to the full MNIST dataset file (.npz)
         max_samples: Maximum number of samples to use (None = use all)
         seed: Random seed for shuffling
         
@@ -95,6 +98,7 @@ def load_all_digits_data(dataset_path="data/mnist_2d_full_dataset.npz", max_samp
             f"Please ensure the dataset exists."
         )
     
+    # Direct loading for speed (optimized path for .npz files)
     data = np.load(dataset_path)
     points = data['points']  # (60000, 500, 2)
     
@@ -109,7 +113,9 @@ def load_all_digits_data(dataset_path="data/mnist_2d_full_dataset.npz", max_samp
         points = points[indices]
         print(f"Using {len(points)} samples (randomly selected)")
     
+    # Convert to JAX array
     X = jnp.array(points)
+    
     return X
 
 
@@ -131,17 +137,13 @@ def create_data_loaders(X, batch_size=32, train_split=0.9, seed=42):
     
     print(f"Train: {len(X_train)}, Test: {len(X_test)}")
     
-    def get_batches(data, batch_size, shuffle=True):
-        """Generator for batches."""
+    def get_batches(data, batch_size, shuffle=False):
+        """Generator for batches - optimized for speed with no shuffling."""
         n = len(data)
-        indices = np.arange(n)
-        if shuffle:
-            rng = np.random.RandomState(seed)
-            rng.shuffle(indices)
-        
+        # Simple sequential batching - no shuffling for speed
         for i in range(0, n, batch_size):
-            batch_indices = indices[i:i+batch_size]
-            yield data[batch_indices]
+            batch = data[i:i+batch_size]
+            yield batch
     
     return X_train, X_test, get_batches
 
@@ -180,9 +182,8 @@ def train_step(model, params, opt_state, x_batch, key, optimizer, update_prior_o
             # Check if this is a prior flow parameter
             # Prior flow parameters are under 'prior_vector_field'
             # In Flax, the path is a tuple of keys like ('params', 'prior_vector_field', ...)
-            # Convert path to string for checking
-            path_str = '/'.join(str(p) for p in path)
-            if 'prior_vector_field' in path_str:
+            # Use tuple comparison instead of string conversion for speed
+            if len(path) >= 2 and path[1] == 'prior_vector_field':
                 return value  # Keep gradient for prior flow
             else:
                 # Zero out gradient for everything else
@@ -194,9 +195,8 @@ def train_step(model, params, opt_state, x_batch, key, optimizer, update_prior_o
     elif freeze_prior:
         def zero_prior_grads(path, value):
             # Check if this is a prior flow parameter
-            # Convert path to string for checking
-            path_str = '/'.join(str(p) for p in path)
-            if 'prior_vector_field' in path_str:
+            # Use tuple comparison instead of string conversion for speed
+            if len(path) >= 2 and path[1] == 'prior_vector_field':
                 # Zero out gradient for prior flow
                 return jnp.zeros_like(value)
             else:
@@ -249,128 +249,6 @@ def evaluate(model, params, X_test, key, batch_size=32, num_samples=100):
     return total_chamfer / count if count > 0 else 0.0
 
 
-def plot_unconditional_samples(model, params, key, output_dir, num_samples=36, num_points=500):
-    """Plot unconditional samples by sampling z and generating point clouds.
-    
-    If use_prior_flow=True: samples z from learned prior distribution.
-    If use_prior_flow=False: samples z from unit normal distribution.
-    """
-    import time
-    print(f"    Generating {num_samples} unconditional samples...")
-    key, k_sample = jax.random.split(key)
-    
-    # Sample z from prior and generate point clouds
-    def sample_single(key_single):
-        """Sample a single point cloud from the prior."""
-        return model.apply(params, num_points, key_single, z=None, method=model.sample)
-    
-    # Vmap over batch dimension
-    keys_sample = jax.random.split(k_sample, num_samples)
-    x_gen = jax.vmap(sample_single, in_axes=(0,))(keys_sample)  # (num_samples, num_points, 2)
-    
-    # Plot on 6x6 grid
-    n_cols = 6
-    n_rows = 6
-    
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 12))
-    axes = axes.flatten()
-    
-    for i in range(num_samples):
-        ax = axes[i]
-        ax.scatter(x_gen[i, :, 0], x_gen[i, :, 1], s=1, alpha=0.6)
-        ax.set_title(f"Sample {i+1}", fontsize=8)
-        ax.set_aspect('equal')
-        ax.set_xlim(-1.5, 1.5)
-        ax.set_ylim(-1.5, 1.5)
-        ax.axis('off')  # Remove axes for cleaner look
-    
-    plt.tight_layout()
-    output_path = output_dir / "unconditional_samples.png"
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"✓ Saved unconditional samples to {output_path}")
-
-
-def plot_samples(model, params, X_test, key, output_dir, num_samples=16, 
-                 use_grid_mask=False, grid_size=3, mask_prob=0.2):
-    """Plot generated samples.
-    
-    Args:
-        use_grid_mask: If True, apply grid mask to ground truth images to show what encoder saw.
-        grid_size: Size of the grid for masking.
-        mask_prob: Probability of masking each grid cell.
-    """
-    num_plot = min(len(X_test), num_samples)
-    
-    # Get a batch
-    batch_x = X_test[:num_plot]
-    key, k_enc, k_sample = jax.random.split(key, 3)
-    
-    # Generate grid mask for encoder if enabled (same mask used during training)
-    encoder_mask = None
-    if use_grid_mask:
-        key, k_mask = jax.random.split(key)
-        encoder_mask = create_grid_mask(batch_x, k_mask, grid_size=grid_size, mask_prob=mask_prob)
-    
-    # Encode (with mask if enabled)
-    if encoder_mask is not None:
-        # Apply mask: encoder sees masked points
-        z_batch, _, _ = model.apply(params, batch_x, k_enc, encoder_mask, method=model.encode)
-    else:
-        z_batch, _, _ = model.apply(params, batch_x, k_enc, None, method=model.encode)
-    
-    # Sample in batch using vmap (much faster!)
-    keys_sample = jax.random.split(k_sample, num_plot)
-    x_gen = sample_batch(model, params, z_batch, keys_sample, batch_x.shape[1])  # (num_plot, N, 2)
-    
-    # Plot
-    n_cols = 4
-    n_rows = (num_plot + n_cols - 1) // n_cols
-    
-    fig, axes = plt.subplots(n_rows, n_cols * 2, figsize=(12, 3 * n_rows))
-    axes = axes.flatten()
-    
-    for i in range(num_plot):
-        # Ground truth (show masked version if grid masking is enabled)
-        ax = axes[i * 2]
-        if use_grid_mask and encoder_mask is not None:
-            # Show what encoder saw: visible points in black, masked points in red
-            visible_mask = encoder_mask[i]
-            masked_mask = ~encoder_mask[i]
-            
-            if jnp.any(visible_mask):
-                ax.scatter(batch_x[i, visible_mask, 0], batch_x[i, visible_mask, 1], 
-                          s=1, alpha=0.5, c='black', label='Visible')
-            if jnp.any(masked_mask):
-                ax.scatter(batch_x[i, masked_mask, 0], batch_x[i, masked_mask, 1], 
-                          s=1, alpha=0.3, c='red', label='Masked')
-            ax.set_title(f"GT (masked) {i}")
-        else:
-            ax.scatter(batch_x[i, :, 0], batch_x[i, :, 1], s=1, alpha=0.5)
-            ax.set_title(f"GT {i}")
-        ax.set_aspect('equal')
-        ax.set_xlim(-1.5, 1.5)
-        ax.set_ylim(-1.5, 1.5)
-        
-        # Generated
-        ax = axes[i * 2 + 1]
-        ax.scatter(x_gen[i, :, 0], x_gen[i, :, 1], s=1, alpha=0.5, color='orange')
-        ax.set_title(f"Gen {i}")
-        ax.set_aspect('equal')
-        ax.set_xlim(-1.5, 1.5)
-        ax.set_ylim(-1.5, 1.5)
-    
-    # Hide unused axes
-    for i in range(num_plot * 2, len(axes)):
-        axes[i].axis('off')
-    
-    plt.tight_layout()
-    output_path = output_dir / "samples.png"
-    plt.savefig(output_path, dpi=150)
-    plt.close()
-    print(f"✓ Saved samples to {output_path}")
-
-
 def main():
     # Configuration
     # Two-stage training protocol:
@@ -381,28 +259,40 @@ def main():
     STAGE_2_EPOCHS = 100  # Train only prior flow (100 more epochs)
     CHECKPOINT_INTERVAL = None  # None = no intermediate checkpoints, only final checkpoint
     BATCH_SIZE = 256  # Doubled from 128
-    LEARNING_RATE = 5e-4  # Increased by factor of 5 from 1e-4
+    LEARNING_RATE = 1e-3  # Default learning rate (0.001)
     MAX_SAMPLES = None  # None = use all available samples (60,000)
     SEED = 42
-    USE_GRID_MASK = True  # Enable grid masking: encoder sees masked points, flow sees full points
+    USE_GRID_MASK = False  # Enable grid masking: encoder sees masked points, flow sees full points
     GRID_SIZE = 3  # 3x3 grid
     GRID_MASK_PROB = 1.0 / 3.0  # Probability of masking each grid cell (1/3)
     RESUME_FROM_CHECKPOINT = None  # Path to checkpoint file to resume from, or None to start fresh
     # If ENABLE_TWO_STAGE_TRAINING=True, these are ignored and stages run automatically
     TRAINING_STAGE = 0  # 0 = Joint training (train everything), 1 = Stage 1 (train model, freeze prior), 2 = Stage 2 (train only prior)
-    JOINT_TRAINING_EPOCHS = 400  # Number of epochs for joint training (when TRAINING_STAGE=0)
+    JOINT_TRAINING_EPOCHS = 100  # Number of epochs for joint training (when TRAINING_STAGE=0)
+    
+    # Momentum configuration: "doubled" (beta1=0.95, beta2=0.9995) or "default" (beta1=0.9, beta2=0.999)
+    MOMENTUM_CONFIG = "default"  # Options: "doubled" or "default"
+    
+    # Set momentum parameters based on config
+    if MOMENTUM_CONFIG == "doubled":
+        BETA1, BETA2 = 0.95, 0.9995
+        momentum_suffix = "momentum_doubled"
+    else:
+        BETA1, BETA2 = 0.9, 0.999
+        momentum_suffix = "momentum_default"
     
     # Output directory (use a new directory for joint training without VAE, with squash instead of LayerNorm)
     if USE_GRID_MASK:
-        output_dir = Path("artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_squash_gridmask")
+        output_dir = Path(f"artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_squash_gridmask_{momentum_suffix}")
     else:
-        output_dir = Path("artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_squash")
+        output_dir = Path(f"artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_squash_{momentum_suffix}")
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("=" * 80)
     print("Training All MNIST Digits Model")
     print("=" * 80)
     print(f"Output directory: {output_dir}")
+    print(f"Momentum config: {MOMENTUM_CONFIG} (beta1={BETA1}, beta2={BETA2})")
     print(f"Training Stage: {TRAINING_STAGE}")
     if TRAINING_STAGE == 0:
         print("  → Joint Training: Training encoder + CRN + prior flow simultaneously")
@@ -419,7 +309,7 @@ def main():
     
     # Load data
     print("Loading full MNIST data...")
-    X = load_all_digits_data(dataset_path="data/mnist_2d_full_dataset.npz", max_samples=MAX_SAMPLES, seed=SEED)
+    X = load_all_digits_data(dataset_path="data/mnist_2d_single.npz", max_samples=MAX_SAMPLES, seed=SEED)
     X_train, X_test, get_batches = create_data_loaders(X, batch_size=BATCH_SIZE, seed=SEED)
     print()
     
@@ -508,7 +398,7 @@ def main():
                 
                 params = checkpoint['params']
                 # Reinitialize optimizer for Stage 2 (switching stages)
-                optimizer = optax.adam(LEARNING_RATE)
+                optimizer = optax.adam(LEARNING_RATE, b1=BETA1, b2=BETA2)
                 opt_state = optimizer.init(params)
                 print("✓ Reinitialized optimizer for Stage 2")
                 
@@ -576,7 +466,7 @@ def main():
                 print()
                 
                 # Optimizer: reinitialize if switching training stages or if opt_state is None
-                optimizer = optax.adam(LEARNING_RATE)
+                optimizer = optax.adam(LEARNING_RATE, b1=BETA1, b2=BETA2)
                 opt_state_loaded = checkpoint.get('opt_state', None)
                 
                 # Reinitialize optimizer if:
@@ -611,7 +501,7 @@ def main():
                 print()
                 
                 # Optimizer
-                optimizer = optax.adam(LEARNING_RATE)
+                optimizer = optax.adam(LEARNING_RATE, b1=BETA1, b2=BETA2)
                 opt_state = optimizer.init(params)
                 
                 start_epoch = 0
@@ -649,9 +539,13 @@ def main():
             
             # Training
             key, k_train = jax.random.split(key)
-            batches = list(get_batches(X_train, BATCH_SIZE, shuffle=True))
+            # Don't convert to list - keep as generator to avoid materializing all batches in memory
+            # Compute total batches for progress bar
+            num_batches = (len(X_train) + BATCH_SIZE - 1) // BATCH_SIZE
+            # No shuffling for speed - simplified batching
+            batches = get_batches(X_train, BATCH_SIZE, shuffle=False)
             
-            for batch_idx, x_batch in enumerate(tqdm(batches, desc=f"Epoch {epoch+1}/{start_epoch + num_epochs}")):
+            for batch_idx, x_batch in enumerate(tqdm(batches, total=num_batches, desc=f"Epoch {epoch+1}/{start_epoch + num_epochs}", ncols=100, mininterval=0.5)):
                 key, k_step = jax.random.split(k_train)
                 params, opt_state, loss, metrics = train_step_jit(params, opt_state, x_batch, k_step)
                 
@@ -747,57 +641,9 @@ def main():
     print(f"Final Chamfer distance: {final_chamfer:.4f}")
     
     # Plot loss trajectory with all components
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    
-    # Top left: Total loss
-    axes[0, 0].plot(loss_history, label='Total Loss', linewidth=2)
-    axes[0, 0].set_xlabel('Epoch')
-    axes[0, 0].set_ylabel('Loss')
-    axes[0, 0].set_title('Total Training Loss')
-    axes[0, 0].grid(True, alpha=0.3)
-    axes[0, 0].legend()
-    
-    # Top right: Individual loss components (log scale)
-    axes[0, 1].plot(flow_loss_history, label='Flow Loss', linewidth=1.5, alpha=0.8)
-    if any(v > 0 for v in prior_flow_loss_history):
-        axes[0, 1].plot(prior_flow_loss_history, label='Prior Flow Loss', linewidth=1.5, alpha=0.8)
-    if any(v > 0 for v in vae_kl_history):
-        axes[0, 1].plot(vae_kl_history, label='VAE KL Loss', linewidth=1.5, alpha=0.8)
-    if any(v > 0 for v in marginal_kl_history):
-        axes[0, 1].plot(marginal_kl_history, label='Marginal KL Loss', linewidth=1.5, alpha=0.8)
-    axes[0, 1].set_xlabel('Epoch')
-    axes[0, 1].set_ylabel('Loss')
-    axes[0, 1].set_title('Loss Components (Log Scale)')
-    axes[0, 1].grid(True, alpha=0.3)
-    axes[0, 1].legend()
-    axes[0, 1].set_yscale('log')  # Log scale for better visibility
-    
-    # Bottom left: Chamfer distance
-    axes[1, 0].plot(chamfer_history, color='green', linewidth=2)
-    axes[1, 0].set_xlabel('Evaluation Step')
-    axes[1, 0].set_ylabel('Chamfer Distance')
-    axes[1, 0].set_title('Chamfer Distance (Lower is Better)')
-    axes[1, 0].grid(True, alpha=0.3)
-    
-    # Bottom right: Loss components (linear scale)
-    axes[1, 1].plot(flow_loss_history, label='Flow Loss', linewidth=1.5, alpha=0.8)
-    if any(v > 0 for v in prior_flow_loss_history):
-        axes[1, 1].plot(prior_flow_loss_history, label='Prior Flow Loss', linewidth=1.5, alpha=0.8)
-    if any(v > 0 for v in vae_kl_history):
-        axes[1, 1].plot(vae_kl_history, label='VAE KL Loss', linewidth=1.5, alpha=0.8)
-    if any(v > 0 for v in marginal_kl_history):
-        axes[1, 1].plot(marginal_kl_history, label='Marginal KL Loss', linewidth=1.5, alpha=0.8)
-    axes[1, 1].set_xlabel('Epoch')
-    axes[1, 1].set_ylabel('Loss')
-    axes[1, 1].set_title('Loss Components (Linear Scale)')
-    axes[1, 1].grid(True, alpha=0.3)
-    axes[1, 1].legend()
-    
-    plt.tight_layout()
-    loss_path = output_dir / "loss_trajectory.png"
-    plt.savefig(loss_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"✓ Saved loss trajectory to {loss_path}")
+    plot_loss_trajectory(loss_history, chamfer_history, flow_loss_history,
+                         prior_flow_loss_history, vae_kl_history, marginal_kl_history,
+                         output_dir)
     
     # Save final checkpoint (always saved, even if checkpointing is off)
     # Use the actual final epoch number (accounting for resume)
