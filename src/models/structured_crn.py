@@ -92,7 +92,7 @@ class StructuredAdaLNMLPCRN(nn.Module):
     hidden_dims: Sequence[int] = (64, 64, 64, 64, 64, 64)
     time_embed_dim: int = 32
     time_embed_type: str = 'sinusoidal'
-    cond_dim: int = 256
+    cond_dim: int = 128
     position_embed_type: str = 'linear'
     activation_fn: str = 'swish'
     

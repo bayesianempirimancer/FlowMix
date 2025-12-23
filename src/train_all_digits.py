@@ -257,7 +257,7 @@ def main():
     ENABLE_TWO_STAGE_TRAINING = False  # If True, automatically run Stage 1 then Stage 2
     STAGE_1_EPOCHS = 100  # Train model without prior flow
     STAGE_2_EPOCHS = 100  # Train only prior flow (100 more epochs)
-    CHECKPOINT_INTERVAL = None  # None = no intermediate checkpoints, only final checkpoint
+    CHECKPOINT_INTERVAL = 50  # Save checkpoint every N epochs (50 = every 50 epochs)
     BATCH_SIZE = 256  # Doubled from 128
     LEARNING_RATE = 1e-3  # Default learning rate (0.001)
     MAX_SAMPLES = None  # None = use all available samples (60,000)
@@ -330,7 +330,10 @@ def main():
         vae_kl_weight=0.0,  # VAE KL loss weight (set to 0)
         marginal_kl_weight=0.0,  # Marginal KL loss weight (set to 0)
         use_prior_flow=True,  # Enable prior flow
-        prior_flow_kwargs={'hidden_dims': (128, 128, 128, 128, 128)},  # 5 layers of size 128
+        prior_flow_kwargs={
+            'hidden_dims': (128, 128, 128, 128, 128),  # 5 layers of size 128
+            'time_embed_dim': 128,  # Time embedding dimension for AdaLN
+        },
         optimal_reweighting=False,  # No optimal reweighting
     )
     
@@ -566,8 +569,8 @@ def main():
             vae_kl_history.append(avg_metrics.get('vae_kl', 0.0))
             marginal_kl_history.append(avg_metrics.get('marginal_kl', 0.0))
             
-            # Evaluation
-            if (epoch + 1) % 5 == 0 or epoch == 0:
+            # Evaluation (every 10 epochs)
+            if (epoch + 1) % 10 == 0 or epoch == 0:
                 key, k_eval = jax.random.split(key)
                 chamfer = evaluate(model, params, X_test, k_eval, batch_size=BATCH_SIZE, num_samples=100)
                 chamfer_history.append(chamfer)

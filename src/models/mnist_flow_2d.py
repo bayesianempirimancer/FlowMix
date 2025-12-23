@@ -16,38 +16,14 @@ import flax.linen as nn
 from typing import Callable, Sequence, Tuple, Any, Optional, Literal
 from enum import Enum
 
-# Encoders
-from src.encoders.global_encoders.pointnet import PointNetEncoder
-from src.encoders.local_encoders.transformer_set import TransformerSetEncoder
-from src.encoders.local_encoders.slot_attention_encoder import SlotAttentionEncoder
-from src.encoders.local_encoders.cross_attention_encoder import CrossAttentionEncoder
-from src.encoders.local_encoders.gmm_featurizer import GMMFeaturizer
-from src.encoders.local_encoders.dgcnn import DGCNN
-
-# Pooling strategies to convert local -> global
-from src.encoders.global_encoders.pooling import (
-    MaxPoolingEncoder,
-    MeanPoolingEncoder,
-    AttentionPoolingEncoder,
-)
+# Encoder factory
+from src.encoders.encoder_factory import create_encoder
 
 from src.encoders.embeddings import SinusoidalTimeEmbedding
 
-# CRNs
-from src.models.global_crn import (
-    GlobalAdaLNMLPCRN,
-    GlobalDiTCRN,
-    GlobalCrossAttentionCRN,
-)
-from src.models.local_crn import (
-    LocalAdaLNMLPCRN,
-    LocalDiTCRN,
-)
-from src.models.structured_crn import (
-    StructuredAdaLNMLPCRN,
-    StructuredCrossAttentionCRN,
-)
-from src.models.simple_latent_flow import SimpleLatentFlow
+# CRN factory
+from src.models.crn_factory import create_crn
+from src.models.simple_latent_flow import AdaLNLatentFlow
 
 
 class PredictionTarget(str, Enum):
@@ -85,7 +61,7 @@ class MnistFlow2D(nn.Module):
         use_prior_flow: Whether to learn p(z) with flow model
         prior_flow_kwargs: Kwargs for prior flow CRN
     """
-    latent_dim: int = 128
+    latent_dim: int = 64
     spatial_dim: int = 2
     encoder_type: str = 'pointnet'
     encoder_output_type: Literal['global', 'local'] = 'global'
@@ -96,102 +72,46 @@ class MnistFlow2D(nn.Module):
     loss_targets: Sequence[PredictionTarget] = (PredictionTarget.VELOCITY,)
     use_vae: bool = False  # Enable VAE mode (mu/logvar split and KL loss)
     vae_kl_weight: float = 0.0  # Weight for VAE KL loss term
-    marginal_kl_weight: float = 0.01  # Weight for marginal KL loss term
+    marginal_kl_weight: float = 0.0  # Weight for marginal KL loss term
     use_prior_flow: bool = False
     prior_flow_kwargs: dict = None
     optimal_reweighting: bool = False  # Apply optimal time-dependent reweighting
     
     def setup(self):
         # Encoder
-        enc_kwargs = self.encoder_kwargs or {}
-        
         # Determine encoder output dimension
         # If use_vae=True, encoder outputs 2*latent_dim for (mu, logvar) split
         encoder_output_dim = 2 * self.latent_dim if self.use_vae else self.latent_dim
         
-        if self.encoder_type == 'pointnet':
-            # PointNet is inherently global
-            self.encoder = PointNetEncoder(latent_dim=encoder_output_dim, **enc_kwargs)
-            self._encoder_is_global = True
-        elif self.encoder_type == 'transformer':
-            # TransformerSetEncoder is local, wrap if needed
-            base_encoder = TransformerSetEncoder(embed_dim=self.latent_dim, **enc_kwargs)
-            if self.encoder_output_type == 'global':
-                self.encoder = MaxPoolingEncoder(base_encoder, encoder_output_dim)
-                self._encoder_is_global = True
-            else:
-                self.encoder = base_encoder
-                self._encoder_is_global = False
-        elif self.encoder_type == 'dgcnn':
-            base_encoder = DGCNN(embed_dim=self.latent_dim, **enc_kwargs)
-            if self.encoder_output_type == 'global':
-                self.encoder = MaxPoolingEncoder(base_encoder, encoder_output_dim)
-                self._encoder_is_global = True
-            else:
-                self.encoder = base_encoder
-                self._encoder_is_global = False
-        elif self.encoder_type == 'slot_attention':
-            # Slot Attention is local (outputs K slots)
-            base_encoder = SlotAttentionEncoder(slot_dim=encoder_output_dim, **enc_kwargs)
-            if self.encoder_output_type == 'global':
-                self.encoder = MaxPoolingEncoder(base_encoder, encoder_output_dim)
-                self._encoder_is_global = True
-            else:
-                self.encoder = base_encoder
-                self._encoder_is_global = False
-        elif self.encoder_type == 'cross_attention':
-            # CrossAttentionEncoder is local (outputs K latent queries)
-            base_encoder = CrossAttentionEncoder(latent_dim=encoder_output_dim, **enc_kwargs)
-            if self.encoder_output_type == 'global':
-                self.encoder = MaxPoolingEncoder(base_encoder, encoder_output_dim)
-                self._encoder_is_global = True
-            else:
-                self.encoder = base_encoder
-                self._encoder_is_global = False
-        elif self.encoder_type == 'gmm':
-            # GMM is local (outputs K components)
-            base_encoder = GMMFeaturizer(latent_dim=encoder_output_dim, **enc_kwargs)
-            if self.encoder_output_type == 'global':
-                self.encoder = MaxPoolingEncoder(base_encoder, encoder_output_dim)
-                self._encoder_is_global = True
-            else:
-                self.encoder = base_encoder
-                self._encoder_is_global = False
-        else:
-            raise ValueError(f"Unknown encoder type: {self.encoder_type}")
+        # Use encoder factory to create encoder
+        # Pass latent_dim separately for encoders that use embed_dim internally (transformer, dgcnn)
+        self.encoder, self._encoder_is_global = create_encoder(
+            encoder_type=self.encoder_type,
+            encoder_output_type=self.encoder_output_type,
+            encoder_output_dim=encoder_output_dim,
+            encoder_kwargs=self.encoder_kwargs,
+            pooling_type='max',  # Default to max pooling for local->global conversion
+            latent_dim=self.latent_dim  # For encoders that use embed_dim internally
+        )
         
         # CRN (choose based on encoder output type)
-        crn_kwargs = self.crn_kwargs or {}
-        
-        if self._encoder_is_global:
-            # Global CRNs: context is (B, Dc)
-            if self.crn_type == 'adaln_mlp':
-                self.crn = GlobalAdaLNMLPCRN(**crn_kwargs)
-            elif self.crn_type == 'dit':
-                self.crn = GlobalDiTCRN(**crn_kwargs)
-            elif self.crn_type == 'cross_attention':
-                self.crn = GlobalCrossAttentionCRN(**crn_kwargs)
-            else:
-                raise ValueError(f"Unknown CRN type: {self.crn_type}")
-        else:
-            # Local/Structured CRNs: context is (B, K, Dc)
-            # For now, use Structured (pool-based) as default
-            # TODO: Add option to use Local CRNs when sampling K points
-            if self.crn_type == 'adaln_mlp':
-                self.crn = StructuredAdaLNMLPCRN(**crn_kwargs)
-            elif self.crn_type == 'cross_attention':
-                self.crn = StructuredCrossAttentionCRN(**crn_kwargs)
-            else:
-                raise ValueError(f"CRN type {self.crn_type} not supported for local encoders")
+        self.crn = create_crn(
+            encoder_is_global=self._encoder_is_global,
+            crn_type=self.crn_type,
+            crn_kwargs=self.crn_kwargs
+        )
         
         # Prior Flow (optional)
-        # Use SimpleLatentFlow for prior flow (simple MLP designed for latent vectors)
+        # Use AdaLNLatentFlow for prior flow (MLP with time-dependent AdaLN for latent vectors)
         if self.use_prior_flow:
             prior_kwargs = dict(self.prior_flow_kwargs or {})
             # Default hidden dims if not specified
             if 'hidden_dims' not in prior_kwargs:
-                prior_kwargs['hidden_dims'] = (256, 256, 256)
-            self.prior_vector_field = SimpleLatentFlow(**prior_kwargs)
+                prior_kwargs['hidden_dims'] = (128, 128, 128, 128)
+            # Default time_embed_dim if not specified
+            if 'time_embed_dim' not in prior_kwargs:
+                prior_kwargs['time_embed_dim'] = 128
+            self.prior_vector_field = AdaLNLatentFlow(**prior_kwargs)
     
     def __call__(self, x: jnp.ndarray, key: jax.random.PRNGKey, 
                  mask: Optional[jnp.ndarray] = None) -> Tuple[jnp.ndarray, dict]:
@@ -690,7 +610,7 @@ class MnistFlow2D(nn.Module):
         # 6. Prior Flow (optional) - only compute if needed for gradients
         if self.use_prior_flow and compute_prior_loss:
             # Train prior flow: mu_z -> N(0, I)
-            # Use SimpleLatentFlow which takes (mu_z, t) directly
+            # Use AdaLNLatentFlow which takes (mu_z, t) directly
             # IMPORTANT: Use mu_z (mean) instead of z (sampled) for prior flow training
             
             # Get mu_z - if VAE is enabled, use mu_z; otherwise use z as mu_z
@@ -719,7 +639,7 @@ class MnistFlow2D(nn.Module):
             
             mu_z_t = (1 - time_prior_exp) * mu_z_stopped + time_prior_exp * z_prior_noise
             
-            # SimpleLatentFlow takes (mu_z, t) directly - no context needed
+            # AdaLNLatentFlow takes (mu_z, t) directly - no context needed
             crn_output_prior = self.prior_vector_field(mu_z_t, time_prior)  # (B, D) or (B, K, D)
             target_v_prior = z_prior_noise - mu_z_stopped
             
@@ -779,7 +699,7 @@ class MnistFlow2D(nn.Module):
                 def prior_step(z_t, step_idx):
                     t = 1.0 + step_idx * dt_prior
                     
-                    # SimpleLatentFlow takes (z, t) directly - no context needed
+                    # AdaLNLatentFlow takes (z, t) directly - no context needed
                     # t should be scalar for single sample
                     t_scalar = t if isinstance(t, (int, float)) else (t[0] if t.ndim > 0 else t)
                     t_batch = jnp.array([t_scalar])  # (1,)
