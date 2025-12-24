@@ -76,7 +76,7 @@ def create_grid_mask(x: jnp.ndarray, key: jax.random.PRNGKey,
     return point_mask
 
 
-def load_all_digits_data(dataset_path="data/mnist_2d_single.npz", max_samples=None, seed=42):
+def load_all_digits_data(dataset_path="src/data/mnist_2d_full_dataset.npz", max_samples=None, seed=42):
     """
     Load all MNIST digits point cloud dataset.
     
@@ -309,7 +309,7 @@ def main():
     
     # Load data
     print("Loading full MNIST data...")
-    X = load_all_digits_data(dataset_path="data/mnist_2d_single.npz", max_samples=MAX_SAMPLES, seed=SEED)
+    X = load_all_digits_data(dataset_path="src/data/mnist_2d_full_dataset.npz", max_samples=MAX_SAMPLES, seed=SEED)
     X_train, X_test, get_batches = create_data_loaders(X, batch_size=BATCH_SIZE, seed=SEED)
     print()
     
