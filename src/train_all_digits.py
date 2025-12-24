@@ -281,11 +281,11 @@ def main():
         BETA1, BETA2 = 0.9, 0.999
         momentum_suffix = "momentum_default"
     
-    # Output directory (use a new directory for joint training without VAE, with squash instead of LayerNorm)
+    # Output directory for joint training without VAE
     if USE_GRID_MASK:
-        output_dir = Path(f"artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_squash_gridmask_{momentum_suffix}")
+        output_dir = Path(f"artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_gridmask_{momentum_suffix}")
     else:
-        output_dir = Path(f"artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_squash_{momentum_suffix}")
+        output_dir = Path(f"artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_{momentum_suffix}")
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("=" * 80)
@@ -309,7 +309,7 @@ def main():
     
     # Load data
     print("Loading full MNIST data...")
-    X = load_all_digits_data(dataset_path="src/data/mnist_2d_full_dataset.npz", max_samples=MAX_SAMPLES, seed=SEED)
+    X = load_all_digits_data(dataset_path="data/mnist_2d_single.npz", max_samples=MAX_SAMPLES, seed=SEED)
     X_train, X_test, get_batches = create_data_loaders(X, batch_size=BATCH_SIZE, seed=SEED)
     print()
     
