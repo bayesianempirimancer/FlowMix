@@ -1,4 +1,4 @@
-# OC-Flow-Mix: Flow Matching for Point Clouds
+# Flow-Mix: Flow Matching for Point Clouds
 
 A JAX-based implementation of **Flow Matching** for generating point clouds of arbitrary dimension. While the provided examples focus on 2D point clouds (MNIST digits), the codebase is fully general and supports point clouds in any spatial dimension (2D, 3D, or higher). This project implements a flexible, modular architecture combining state-of-the-art encoders with Conditional ResNets (CRNs) for simulation-free generative modeling of point cloud data.
 
