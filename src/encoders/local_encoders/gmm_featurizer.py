@@ -16,7 +16,7 @@ class GMMFeaturizer(nn.Module):
     L = K * (1 + 2*D) where K is num_clusters.
     """
     num_clusters: int = 10
-    hidden_dim: int = 128
+    hidden_dim: int = 32
     backbone_type: str = 'transformer' # 'transformer' or 'pointnet'
     global_scale: float = 0.3  # Empirical std of MNIST point clouds
     init_method: str = 'fps'
@@ -90,9 +90,8 @@ class GMMFeaturizer(nn.Module):
         valid_mask_expanded = jnp.repeat(valid_mask[:, :, None], 1 + 2*D, axis=2)
         valid_mask_seq = valid_mask_expanded.reshape(B, L)
         
-        # Zero out invalid points (using mask)
         points_seq = points_seq * valid_mask_seq[:, :, None]
         
-        # Return sequence of points (B, L, D)
-        return points_seq, valid_mask_seq
+        # Return sequence of features (B, L, latent_dim) or (B, L, D)
+        return points_seq
 
