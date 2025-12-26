@@ -258,7 +258,7 @@ def main():
     STAGE_1_EPOCHS = 100  # Train model without prior flow
     STAGE_2_EPOCHS = 100  # Train only prior flow (100 more epochs)
     CHECKPOINT_INTERVAL = 50  # Save checkpoint every N epochs (50 = every 50 epochs)
-    BATCH_SIZE = 256  # Doubled from 128
+    BATCH_SIZE = 512  # Doubled from 128
     LEARNING_RATE = 1e-3  # Default learning rate (0.001)
     MAX_SAMPLES = None  # None = use all available samples (60,000)
     SEED = 42
@@ -283,9 +283,9 @@ def main():
     
     # Output directory for joint training without VAE
     if USE_GRID_MASK:
-        output_dir = Path(f"artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_gridmask_{momentum_suffix}")
+        output_dir = Path(f"artifacts/all_digits_pointnet_gmmix_velocity_no_vae_prior_flow_joint_gridmask_{momentum_suffix}")
     else:
-        output_dir = Path(f"artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_{momentum_suffix}")
+        output_dir = Path(f"artifacts/all_digits_pointnet_gmmix_velocity_no_vae_prior_flow_joint_{momentum_suffix}")
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("=" * 80)
@@ -319,9 +319,10 @@ def main():
         latent_dim=32,  # Reduced from 64 by factor of 2
         encoder_type='pointnet',
         encoder_output_type='global',
-        crn_type='adaln_mlp',
+        crn_type='gmflow',
         crn_kwargs={
-            'hidden_dims': (32, 32, 32, 32, 32, 32),  # Reduced from (64, 64, 64, 64, 64, 64) by factor of 2
+            'num_components': 32,
+            'hidden_dims': (32, 32),  # Reduced from (64, 64, 64, 64, 64, 64) by factor of 2
             'cond_dim': 64,  # Reduced from 128 by another factor of 2 (originally 256)
         },
         prediction_target=PredictionTarget.VELOCITY,  # Predict velocity
@@ -329,7 +330,7 @@ def main():
         use_vae=False,  # VAE mode disabled - using LayerNorm instead
         vae_kl_weight=0.0,  # VAE KL loss weight (set to 0)
         marginal_kl_weight=0.0,  # Marginal KL loss weight (set to 0)
-        use_prior_flow=True,  # Enable prior flow
+        use_prior_flow=False,  # Enable prior flow
         prior_flow_kwargs={
             'hidden_dims': (128, 128, 128, 128, 128),  # 5 layers of size 128
             'time_embed_dim': 128,  # Time embedding dimension for AdaLN

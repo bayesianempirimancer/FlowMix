@@ -106,7 +106,7 @@ def create_encoder(
             
     elif encoder_type == 'gmm':
         # GMM is local (outputs K components)
-        base_encoder = GMMFeaturizer(latent_dim=encoder_output_dim, **enc_kwargs)
+        base_encoder = GMMFeaturizer(hidden_dim=encoder_output_dim, **enc_kwargs)
         if encoder_output_type == 'global':
             encoder = _get_pooling_encoder(base_encoder, encoder_output_dim, pooling_type)
             is_global = True

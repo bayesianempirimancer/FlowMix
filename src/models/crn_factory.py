@@ -12,6 +12,7 @@ from src.models.global_crn import (
     GlobalDiTCRN,
     GlobalCrossAttentionCRN,
 )
+from src.models.gmflow_crn import GlobalGMFlowCRN
 
 # Structured CRNs
 from src.models.structured_crn import (
@@ -31,7 +32,7 @@ def create_crn(
     Args:
         encoder_is_global: Whether the encoder outputs global (single vector) or 
                           local/structured (multiple vectors) features
-        crn_type: Type of CRN ('adaln_mlp', 'dit', 'cross_attention')
+        crn_type: Type of CRN ('adaln_mlp', 'dit', 'cross_attention', 'gmflow')
         crn_kwargs: Optional kwargs to pass to the CRN
         
     Returns:
@@ -50,6 +51,8 @@ def create_crn(
             return GlobalDiTCRN(**crn_kwargs)
         elif crn_type == 'cross_attention':
             return GlobalCrossAttentionCRN(**crn_kwargs)
+        elif crn_type == 'gmflow':
+            return GlobalGMFlowCRN(**crn_kwargs)
         else:
             raise ValueError(f"Unknown CRN type: {crn_type}")
     else:

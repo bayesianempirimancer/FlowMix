@@ -170,7 +170,8 @@ class MnistFlow2D(nn.Module):
                 z_encoded = z_encoded / z_encoded_norm
             return z_encoded, None, None
     
-    def convert_crn_output_to_velocity(self, crn_output: jnp.ndarray, 
+    
+    def convert_crn_output_to_velocity(self, crn_output: Any, 
                                        x_t: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:
         """
         Convert CRN output to velocity field.
@@ -183,8 +184,11 @@ class MnistFlow2D(nn.Module):
         - If predicting noise ε (where ε = x_1): v = (ε - x_t) / (1-t)
         - If predicting target x_0: v = (x_t - x_0) / t
         
+        For GMFlow (returns dict):
+        - Compute expected velocity v = sum(pi_k * mu_k)
+        
         Args:
-            crn_output: CRN output, shape (B, N, D)
+            crn_output: CRN output, shape (B, N, D) OR dict for GMFlow
             x_t: Interpolated point at time t, shape (B, N, D)
             t: Time, shape (B, 1, 1) or (B, 1) or (B,)
         
@@ -196,6 +200,32 @@ class MnistFlow2D(nn.Module):
             t = t[:, None, None]  # (B,) -> (B, 1, 1)
         elif t.ndim == 2 and t.shape[-1] == 1:
             t = t[:, :, None]  # (B, 1) -> (B, 1, 1)
+            
+        # Handle GMFlow output (dict)
+        if isinstance(crn_output, dict):
+            # Compute expected velocity: E[v] = sum(pi_k * mu_k)
+            logits = crn_output['logits']  # (B, N, K) or (B, K)
+            means = crn_output['means']    # (B, N, K, D) or (B, K, D)
+            
+            # Normalize logits to probabilities
+            probs = jax.nn.softmax(logits, axis=-1)
+            
+            # Broadcast probs if needed to match means
+            # If probs is (B, K) and means is (B, K, D) -> (B, K, 1)
+            # If probs is (B, N, K) and means is (B, N, K, D) -> (B, N, K, 1)
+            probs_expanded = probs[..., None]
+            
+            # Compute expectation
+            # Sum over component dimension (K is -2)
+            v_expected = jnp.sum(probs_expanded * means, axis=-2)
+            
+            # If GMFlow output was global (B, K, D), v_expected is (B, D)
+            # Broadcast to (B, N, D) if x_t has N points
+            if v_expected.ndim == 2 and x_t.ndim == 3:
+                v_expected = v_expected[:, None, :]
+                
+            # Assume GMFlow always predicts VELOCITY for now
+            return v_expected
         
         if self.prediction_target == PredictionTarget.VELOCITY:
             # Already velocity
@@ -214,13 +244,13 @@ class MnistFlow2D(nn.Module):
         else:
             raise ValueError(f"Unknown prediction target: {self.prediction_target}")
     
-    def convert_crn_output_to_noise(self, crn_output: jnp.ndarray,
+    def convert_crn_output_to_noise(self, crn_output: Any,
                                     x_t: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:
         """
         Convert CRN output to noise (ε = x_1).
         
         Args:
-            crn_output: CRN output, shape (B, N, D)
+            crn_output: CRN output, shape (B, N, D) OR dict
             x_t: Interpolated point at time t, shape (B, N, D)
             t: Time, shape (B, 1, 1) or (B, 1) or (B,)
         
@@ -232,6 +262,13 @@ class MnistFlow2D(nn.Module):
             t = t[:, None, None]
         elif t.ndim == 2 and t.shape[-1] == 1:
             t = t[:, :, None]
+            
+        # Handle GMFlow
+        if isinstance(crn_output, dict):
+            # Get velocity first
+            v = self.convert_crn_output_to_velocity(crn_output, x_t, t)
+            # x_1 = x_t + (1-t)v
+            return x_t + (1 - t) * v
         
         if self.prediction_target == PredictionTarget.NOISE:
             # Already noise
@@ -249,13 +286,13 @@ class MnistFlow2D(nn.Module):
         else:
             raise ValueError(f"Unknown prediction target: {self.prediction_target}")
     
-    def convert_crn_output_to_target(self, crn_output: jnp.ndarray,
+    def convert_crn_output_to_target(self, crn_output: Any,
                                      x_t: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:
         """
         Convert CRN output to target (x_0, the data point).
         
         Args:
-            crn_output: CRN output, shape (B, N, D)
+            crn_output: CRN output, shape (B, N, D) OR dict
             x_t: Interpolated point at time t, shape (B, N, D)
             t: Time, shape (B, 1, 1) or (B, 1) or (B,)
         
@@ -267,6 +304,13 @@ class MnistFlow2D(nn.Module):
             t = t[:, None, None]
         elif t.ndim == 2 and t.shape[-1] == 1:
             t = t[:, :, None]
+            
+        # Handle GMFlow
+        if isinstance(crn_output, dict):
+            # Get velocity first
+            v = self.convert_crn_output_to_velocity(crn_output, x_t, t)
+            # x_0 = x_t - t*v
+            return x_t - t * v
         
         if self.prediction_target == PredictionTarget.TARGET:
             # Already target (x_0)
@@ -501,66 +545,119 @@ class MnistFlow2D(nn.Module):
         else:
             crn_output = self.crn(x_t, z, t, mask=mask)
         
+        
         # 4. Compute losses efficiently using affine relationships
-        # Compute base loss in CRN's prediction space, then apply time-dependent weights
-        # for additional loss terms if requested.
         
-
-        loss_weight = 0.0
-        
-        # Compute base squared error in CRN's native prediction space (per point)
-        # Mean over feature dimension to save memory: (B, N, D) -> (B, N)
-        if self.prediction_target == PredictionTarget.VELOCITY:
-            sq_err = jnp.mean((crn_output - (x_1 - x_0)) ** 2, axis=-1)  # (B, N)
-            for target_type in self.loss_targets:
-                if target_type == PredictionTarget.VELOCITY:
-                    loss_weight = loss_weight + 1.0
-                elif target_type == PredictionTarget.NOISE:
-                    loss_weight = loss_weight + (1 - t) ** 2
-                elif target_type == PredictionTarget.TARGET:
-                    loss_weight = loss_weight + t ** 2
-
-        elif self.prediction_target == PredictionTarget.NOISE:
-            sq_err = jnp.mean((crn_output - x_1) ** 2, axis=-1)  # (B, N)
-            for target_type in self.loss_targets:
-                if target_type == PredictionTarget.VELOCITY:
-                    loss_weight = loss_weight + 1.0 / ((1 - t) ** 2 + 1e-8)
-                elif target_type == PredictionTarget.NOISE:
-                    loss_weight = loss_weight + 1.0
-                elif target_type == PredictionTarget.TARGET:
-                    loss_weight = loss_weight + (t / (1 - t + 1e-8)) ** 2
-
-        elif self.prediction_target == PredictionTarget.TARGET:
-            sq_err = jnp.mean((crn_output - x_0) ** 2, axis=-1)  # (B, N)
-            for target_type in self.loss_targets:
-                if target_type == PredictionTarget.VELOCITY:
-                    loss_weight = loss_weight + 1.0 / (t ** 2 + 1e-8)
-                elif target_type == PredictionTarget.NOISE:
-                    loss_weight = loss_weight + (1 - t)**2 / (t**2 + 1e-8)
-                elif target_type == PredictionTarget.TARGET:
-                    loss_weight = loss_weight + 1.0
-
+        # Handle GMFlow (dict output)
+        if isinstance(crn_output, dict):
+            # GMFlow uses NLL loss: -log sum(pi * N(v; mu, sigma))
+            # The target is the velocity field v.
+            # In general, according to Eq (2) of the paper: u = (x_t - x_0) / sigma_t
+            # For our linear schedule (sigma_t = t, alpha_t = 1-t), this simplifies to x_1 - x_0.
+            # We use the simplified form here for numerical stability (avoids division by small t).
+            v_target = x_1 - x_0
+            
+            # Extract parameters
+            logits = crn_output['logits']   # (B, N, K) or (B, K)
+            means = crn_output['means']     # (B, N, K, D) or (B, K, D)
+            logvars = crn_output['logvars'] # (B, 1, 1, 1) or (B, 1, 1)
+            
+            # Broadcast global outputs to per-point if needed
+            if logits.ndim == 2: # (B, K)
+                logits = logits[:, None, :] # (B, 1, K)
+            
+            if means.ndim == 3: # (B, K, D)
+                means = means[:, None, :, :] # (B, 1, K, D)
+                
+            if logvars.ndim == 3: # (B, 1, 1)
+                logvars = logvars[:, None, :, :] # (B, 1, 1, 1)
+            
+            # Target needs to be broadcast to (B, N, 1, D) for K components
+            v_target_expanded = v_target[:, :, None, :]
+            
+            # Compute log likelihood per component: log N(v; mu, sigma)
+            # = -0.5 * (D * log(2pi) + sum(logvar) + sum((v-mu)^2 / exp(logvar)))
+            neg_half_log_2pi = -0.5 * jnp.log(2 * jnp.pi)
+            
+            # (B, N, K, D) -> sum over D -> (B, N, K)
+            log_prob_component = jnp.sum(
+                neg_half_log_2pi - 0.5 * logvars - 0.5 * jnp.square(v_target_expanded - means) * jnp.exp(-logvars),
+                axis=-1
+            )
+            
+            # Combine with mixture weights using LogSumExp for stability
+            # log p(v) = log sum(exp(logits) * exp(log_prob_comp)) - log sum(exp(logits))
+            #          = log sum(exp(logits + log_prob_comp)) - log sum(exp(logits))
+            #          = LSE(logits + log_prob_comp) - LSE(logits)
+            
+            log_likelihood = jax.nn.logsumexp(logits + log_prob_component, axis=-1) - jax.nn.logsumexp(logits, axis=-1)
+            
+            # NLL = -log_likelihood
+            nll = -log_likelihood # (B, N)
+            
+            # Apply standard flow matching weighting if requested (usually 1.0 for velocity)
+            # Default to uniform weighting for GMFlow unless specified
+            loss_weight = 1.0
+            
+            sq_err = nll
+            
         else:
-            raise ValueError(f"Unknown prediction target: {self.prediction_target}")
+            loss_weight = 0.0
+            # Standard Regression Loss (MSE)
+            # Compute base squared error in CRN's native prediction space (per point)
+            # Mean over feature dimension to save memory: (B, N, D) -> (B, N)
+            if self.prediction_target == PredictionTarget.VELOCITY:
+                sq_err = jnp.mean((crn_output - (x_1 - x_0)) ** 2, axis=-1)  # (B, N)
+                for target_type in self.loss_targets:
+                    if target_type == PredictionTarget.VELOCITY:
+                        loss_weight = loss_weight + 1.0
+                    elif target_type == PredictionTarget.NOISE:
+                        loss_weight = loss_weight + (1 - t) ** 2
+                    elif target_type == PredictionTarget.TARGET:
+                        loss_weight = loss_weight + t ** 2
+    
+            elif self.prediction_target == PredictionTarget.NOISE:
+                sq_err = jnp.mean((crn_output - x_1) ** 2, axis=-1)  # (B, N)
+                for target_type in self.loss_targets:
+                    if target_type == PredictionTarget.VELOCITY:
+                        loss_weight = loss_weight + 1.0 / ((1 - t) ** 2 + 1e-8)
+                    elif target_type == PredictionTarget.NOISE:
+                        loss_weight = loss_weight + 1.0
+                    elif target_type == PredictionTarget.TARGET:
+                        loss_weight = loss_weight + (t / (1 - t + 1e-8)) ** 2
+    
+            elif self.prediction_target == PredictionTarget.TARGET:
+                sq_err = jnp.mean((crn_output - x_0) ** 2, axis=-1)  # (B, N)
+                for target_type in self.loss_targets:
+                    if target_type == PredictionTarget.VELOCITY:
+                        loss_weight = loss_weight + 1.0 / (t ** 2 + 1e-8)
+                    elif target_type == PredictionTarget.NOISE:
+                        loss_weight = loss_weight + (1 - t)**2 / (t**2 + 1e-8)
+                    elif target_type == PredictionTarget.TARGET:
+                        loss_weight = loss_weight + 1.0
+    
+            else:
+                raise ValueError(f"Unknown prediction target: {self.prediction_target}")
+            
+            # If VAE is enabled, ensure target loss is included
+            if self.use_vae:
+                if PredictionTarget.TARGET not in self.loss_targets:
+                    if self.prediction_target == PredictionTarget.VELOCITY:
+                        loss_weight = loss_weight + t ** 2
+                    elif self.prediction_target == PredictionTarget.NOISE:
+                        loss_weight = loss_weight + ((1 - t) / (t + 1e-8)) ** 2
+                    elif self.prediction_target == PredictionTarget.TARGET:
+                        loss_weight = loss_weight + 1.0
         
-        # If VAE is enabled, ensure target loss is included
-        if self.use_vae:
-            if PredictionTarget.TARGET not in self.loss_targets:
-                if self.prediction_target == PredictionTarget.VELOCITY:
-                    loss_weight = loss_weight + t ** 2
-                elif self.prediction_target == PredictionTarget.NOISE:
-                    loss_weight = loss_weight + ((1 - t) / (t + 1e-8)) ** 2
-                elif self.prediction_target == PredictionTarget.TARGET:
-                    loss_weight = loss_weight + 1.0
-
         # Sum over spatial dimension first, then apply weight
         if mask is not None:
+             # sq_err is (B, N) - apply mask and average
             sq_err = jnp.sum(sq_err * mask, axis=-1) / (jnp.sum(mask, axis=-1) + 1e-10)  # (B, N) -> (B,)
         else:
             sq_err = jnp.mean(sq_err, axis=-1)  # (B, N) -> (B,)
         
         # Apply time-dependent weight per sample (optimal reweighting for flow matching)
-        if self.optimal_reweighting:
+        if self.optimal_reweighting and not isinstance(crn_output, dict):
             if self.prediction_target == PredictionTarget.VELOCITY:
                 # Optimal weight: (1-t)/t for velocity prediction
                 loss_weight = loss_weight * (1 - t) / (t + 1e-8)
@@ -572,15 +669,15 @@ class MnistFlow2D(nn.Module):
                 loss_weight = loss_weight * (1 - t) / (t**3 + 1e-8)
             else:
                 raise ValueError(f"Unknown prediction target: {self.prediction_target}")
-
+                
+        # For GMFlow, we trust the NLL formulation and don't apply extra reweighting by default yet
+        
         flow_loss = jnp.mean(sq_err * loss_weight)  # (B,) * (B,) -> (B,) -> scalar
-
         
         # 5. VAE KL: KL(q(z|x) || N(0,I)) - only if use_vae=True
         if self.use_vae:
             # Shape depends on encoder type:
             # - Global: (B, Dc) -> (B,)
-            # - Local: (B, K, Dc) -> (B, K) -> (B,)
             vae_kl = jnp.exp(logvar_z) + jnp.square(mu_z) - 1.0 - logvar_z            
             vae_kl = 0.5*jnp.mean(vae_kl)
         else:
