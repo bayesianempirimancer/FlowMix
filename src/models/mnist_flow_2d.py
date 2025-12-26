@@ -62,6 +62,7 @@ class MnistFlow2D(nn.Module):
         prior_flow_kwargs: Kwargs for prior flow CRN
     """
     latent_dim: int = 64
+    num_latents: int = 1
     spatial_dim: int = 2
     encoder_type: str = 'pointnet'
     encoder_output_type: Literal['global', 'local'] = 'global'
@@ -70,6 +71,7 @@ class MnistFlow2D(nn.Module):
     crn_kwargs: dict = None
     prediction_target: PredictionTarget = PredictionTarget.VELOCITY
     loss_targets: Sequence[PredictionTarget] = (PredictionTarget.VELOCITY,)
+    normalize_z: bool = True
     use_vae: bool = False  # Enable VAE mode (mu/logvar split and KL loss)
     vae_kl_weight: float = 0.0  # Weight for VAE KL loss term
     marginal_kl_weight: float = 0.0  # Weight for marginal KL loss term
@@ -114,8 +116,9 @@ class MnistFlow2D(nn.Module):
             self.prior_vector_field = AdaLNLatentFlow(**prior_kwargs)
     
     def __call__(self, x: jnp.ndarray, key: jax.random.PRNGKey, 
-                 mask: Optional[jnp.ndarray] = None) -> Tuple[jnp.ndarray, dict]:
-        return self.compute_loss(x, key, mask=mask)
+                 enc_mask: Optional[jnp.ndarray] = None,
+                 point_mask: Optional[jnp.ndarray] = None) -> Tuple[jnp.ndarray, dict]:
+        return self.compute_loss(x, key, enc_mask=enc_mask, point_mask=point_mask)
     
     def reparameterize(self, mu: jnp.ndarray, logvar: jnp.ndarray, 
                        key: jax.random.PRNGKey) -> jnp.ndarray:
@@ -153,19 +156,13 @@ class MnistFlow2D(nn.Module):
             # or: (B, K, 2*D) -> (B, K, D), (B, K, D)
             z_mu, z_logvar = jnp.split(z_encoded, 2, axis=-1)
             # Normalize z_mu to unit vector with numerical stability
-            z_mu_norm = jnp.sqrt(jnp.sum(z_mu**2, axis=-1, keepdims=True) + 1e-8)
-            z_mu = z_mu / z_mu_norm
+            if self.normalize_z:
+                z_mu_norm = jnp.sqrt(jnp.sum(z_mu**2, axis=-1, keepdims=True) + 1e-8)
+                z_mu = z_mu / z_mu_norm
             z = self.reparameterize(z_mu, z_logvar, key)
             return z, z_mu, z_logvar
         else:
-            # No VAE: use encoder output directly
-            # Normalize to unit vector with numerical stability
-            if z_encoded.ndim == 3:
-                # Local: (B, K, D) - normalize across last dimension
-                z_encoded_norm = jnp.sqrt(jnp.sum(z_encoded**2, axis=-1, keepdims=True) + 1e-8)
-                z_encoded = z_encoded / z_encoded_norm
-            else:
-                # Global: (B, D) - normalize across last dimension
+            if self.normalize_z:
                 z_encoded_norm = jnp.sqrt(jnp.sum(z_encoded**2, axis=-1, keepdims=True) + 1e-8)
                 z_encoded = z_encoded / z_encoded_norm
             return z_encoded, None, None
@@ -286,7 +283,7 @@ class MnistFlow2D(nn.Module):
             raise ValueError(f"Unknown prediction target: {self.prediction_target}")
     
     def compute_crn_jacobian_trace(self, x_t: jnp.ndarray, z: jnp.ndarray, 
-                                   t: jnp.ndarray, mask: Optional[jnp.ndarray] = None,
+                                   t: jnp.ndarray, point_mask: Optional[jnp.ndarray] = None,
                                    hutchinson_samples: int = 1) -> jnp.ndarray:
         """
         Compute trace of Jacobian of CRN output w.r.t. x_t using Hutchinson's estimator.
@@ -303,7 +300,7 @@ class MnistFlow2D(nn.Module):
             x_t: Input points, shape (B, N, D)
             z: Latent context, shape (B, Dc) or (B, K, Dc)
             t: Time, scalar or (B,) or (B, 1)
-            mask: Optional mask, shape (B, N)
+            point_mask: Optional mask for valid points, shape (B, N)
             hutchinson_samples: Number of random samples (1 is usually sufficient)
         
         Returns:
@@ -312,10 +309,10 @@ class MnistFlow2D(nn.Module):
         B, N, D = x_t.shape
         
         # Define CRN function for a single point
-        def crn_single(x_point, z_ctx, t_val, mask_val):
+        def crn_single(x_point, z_ctx, t_val, point_mask_val):
             """
             CRN output for a single point.
-            x_point: (D,), z_ctx: (Dc,) or (K, Dc), t_val: (), mask_val: ()
+            x_point: (D,), z_ctx: (Dc,) or (K, Dc), t_val: (), point_mask_val: ()
             Returns: (D,)
             """
             x_reshaped = x_point[None, None, :]  # (1, 1, D)
@@ -326,13 +323,13 @@ class MnistFlow2D(nn.Module):
                 out = self.crn(x_reshaped, z_reshaped, t_reshaped)
             else:
                 z_reshaped = z_ctx[None, :, :] if z_ctx.ndim == 2 else z_ctx[None, None, :]
-                mask_reshaped = jnp.array([[mask_val]]) if mask_val is not None else None
-                out = self.crn(x_reshaped, z_reshaped, t_reshaped, mask=mask_reshaped)
+                point_mask_reshaped = jnp.array([[point_mask_val]]) if point_mask_val is not None else None
+                out = self.crn(x_reshaped, z_reshaped, t_reshaped, mask=point_mask_reshaped)
             
             return out[0, 0, :]  # (D,)
         
         # Hutchinson's trace estimator
-        def hutchinson_trace(x_point, z_ctx, t_val, mask_val, key):
+        def hutchinson_trace(x_point, z_ctx, t_val, point_mask_val, key):
             """Estimate trace(J) using Hutchinson's method."""
             def single_sample(subkey):
                 # Random vector with ±1 entries (Rademacher distribution)
@@ -340,7 +337,7 @@ class MnistFlow2D(nn.Module):
                 
                 # Compute Jacobian-vector product: J @ v using forward-mode AD
                 _, jvp_result = jax.jvp(
-                    lambda x: crn_single(x, z_ctx, t_val, mask_val),
+                    lambda x: crn_single(x, z_ctx, t_val, point_mask_val),
                     (x_point,),
                     (v,)
                 )
@@ -369,8 +366,8 @@ class MnistFlow2D(nn.Module):
         else:  # Local/Structured (B, K, Dc)
             z_array = jnp.tile(z[:, None, :, :], (1, N, 1, 1))
         
-        # Prepare mask
-        mask_array = jnp.ones((B, N)) if mask is None else mask
+        # Prepare point_mask
+        point_mask_array = jnp.ones((B, N)) if point_mask is None else point_mask
         
         # Generate random keys for each point
         key = jax.random.PRNGKey(0)  # Fixed seed for deterministic estimation
@@ -382,11 +379,11 @@ class MnistFlow2D(nn.Module):
             in_axes=(0, 0, 0, 0, 0)
         )
         
-        all_traces = trace_vmap(x_t, z_array, t_array, mask_array, keys)
+        all_traces = trace_vmap(x_t, z_array, t_array, point_mask_array, keys)
         return all_traces  # (B, N)
     
     def compute_velocity_divergence(self, x_t: jnp.ndarray, z: jnp.ndarray,
-                                    t: jnp.ndarray, mask: Optional[jnp.ndarray] = None) -> jnp.ndarray:
+                                    t: jnp.ndarray, point_mask: Optional[jnp.ndarray] = None) -> jnp.ndarray:
         """
         Compute divergence of the velocity field.
         
@@ -399,18 +396,17 @@ class MnistFlow2D(nn.Module):
         2. If predicting noise ε:
            v = (ε - x_t) / (1-t)
            div(v) = D / (1-t) - trace(J_crn) / (1-t)
-                  = (D - trace(J_crn)) / (1-t)
+                  = (trace(J_crn) - D) / (1-t)
         
         3. If predicting target x_0:
            v = (x_t - x_0) / t
-           div(v) = D / t - trace(J_crn) / t
-                  = (D - trace(J_crn)) / t
+           div(v) = (D - trace(J_crn)) / t
         
         Args:
             x_t: Input points, shape (B, N, D)
             z: Latent context, shape (B, Dc) or (B, K, Dc)
             t: Time, scalar or (B,) or (B, 1)
-            mask: Optional mask, shape (B, N)
+            point_mask: Optional mask for valid points, shape (B, N)
         
         Returns:
             Divergence of velocity field, shape (B, N)
@@ -418,7 +414,7 @@ class MnistFlow2D(nn.Module):
         B, N, D = x_t.shape
         
         # Compute trace of CRN Jacobian
-        trace_jac_crn = self.compute_crn_jacobian_trace(x_t, z, t, mask)  # (B, N)
+        trace_jac_crn = self.compute_crn_jacobian_trace(x_t, z, t, point_mask)  # (B, N)
         
         # Ensure t has correct shape for broadcasting
         if jnp.isscalar(t):
@@ -437,15 +433,11 @@ class MnistFlow2D(nn.Module):
         
         elif self.prediction_target == PredictionTarget.NOISE:
             # v = (ε - x_t) / (1-t)
-            # dv_i/dx_i = (dε_i/dx_i - 1) / (1-t)
-            # div(v) = sum_i dv_i/dx_i = (trace(J_ε) - D) / (1-t)
-            # Since ε doesn't depend on x_t directly through identity:
             # div(v) = (trace(J_crn) - D) / (1-t)
             return (trace_jac_crn - D) / (1 - t_broadcast + 1e-8)
         
         elif self.prediction_target == PredictionTarget.TARGET:
             # v = (x_t - x_0) / t
-            # dv_i/dx_i = (1 - dx0_i/dx_i) / t
             # div(v) = (D - trace(J_x0)) / t
             return (D - trace_jac_crn) / (t_broadcast + 1e-8)
         
@@ -453,8 +445,8 @@ class MnistFlow2D(nn.Module):
             raise ValueError(f"Unknown prediction target: {self.prediction_target}")
     
     def compute_loss(self, x: jnp.ndarray, key: jax.random.PRNGKey,
-                    mask: Optional[jnp.ndarray] = None,
-                    encoder_mask: Optional[jnp.ndarray] = None,
+                    enc_mask: Optional[jnp.ndarray] = None,
+                    point_mask: Optional[jnp.ndarray] = None,
                     compute_prior_loss: bool = True,
                     prior_only_mode: bool = False) -> Tuple[jnp.ndarray, dict]:
         """
@@ -463,8 +455,12 @@ class MnistFlow2D(nn.Module):
         Args:
             x: Input point cloud, shape (B, N, D) - full point cloud for flow training
             key: Random key
-            mask: Optional mask for flow training, shape (B, N) (currently unused, flow uses full x)
-            encoder_mask: Optional mask for encoder, shape (B, N) - masked points generate z
+            enc_mask: Optional mask for encoder, shape (B, N) - used for masked VAE/grid masking.
+                     When provided, encoder sees masked points (for robust encoding).
+                     Flow training always uses full x regardless of enc_mask.
+            point_mask: Optional mask for loss computation, shape (B, N) - used for variable-length
+                       point clouds. When provided, masks out invalid/padding points in loss computation.
+                       True = valid point, False = invalid/padding point.
         
         Returns:
             loss: Total loss
@@ -475,11 +471,31 @@ class MnistFlow2D(nn.Module):
         else:
             k_sample, k_flow = jax.random.split(key)
         
-        # 1. Encode using encoder_mask (masked points generate z)
-        # If encoder_mask is provided, use it; otherwise use mask (for backward compatibility)
-        enc_mask = encoder_mask if encoder_mask is not None else mask
+        # 1. Encode using enc_mask (encoder handles mask=None)
+        # When enc_mask is provided (grid masking), encoder sees masked points, but flow uses full x
         z, mu_z, logvar_z = self.encode(x, k_sample, mask=enc_mask)
+
+        # 2. VAE KL loss and Marginal KL loss
+        if self.use_vae and mu_z is not None and logvar_z is not None:
+            # VAE KL: KL(q(z|x) || N(0,I))
+            vae_kl = jnp.exp(logvar_z) + jnp.square(mu_z) - 1.0 - logvar_z            
+            vae_kl = 0.5 * jnp.mean(vae_kl)
+        else:
+            vae_kl = 0.0
         
+        # Marginal KL: KL(p(z) || N(0,I)) where p(z) = E_x[q(z|x)]
+        # Compute empirical mean and variance of z in batch
+        # z shape: (B, D) for global, (B, K, D) for local
+        z_mean = jnp.mean(z)
+        z_var = jnp.var(z)
+        
+        # KL divergence: KL(N(μ_emp, σ²_emp) || N(0, I))
+        # = 0.5 * [tr(Σ) + μ^T μ - D - log|Σ|]
+        # where Σ is diagonal with σ²_emp
+        marginal_kl = (z_var + z_mean**2 - 1.0 - jnp.log(z_var + 1e-8))
+        marginal_kl = 0.5 * marginal_kl
+
+
         # 2. Flow Matching Setup
         B, N, D = x.shape
         x_0 = x  # Data
@@ -494,18 +510,16 @@ class MnistFlow2D(nn.Module):
         t_exp = t[:, None, None]  # (B, 1, 1)
         x_t = (1 - t_exp) * x_0 + t_exp * x_1
                 
-        # 3. CRN Output
-        # Global CRNs don't take mask, Structured CRNs do
+        # 4. CRN Output
+        # Global CRNs don't take mask, Structured CRNs do (use point_mask for CRN if needed)
         if self._encoder_is_global:
             crn_output = self.crn(x_t, z, t)
         else:
-            crn_output = self.crn(x_t, z, t, mask=mask)
+            crn_output = self.crn(x_t, z, t, mask=point_mask)
         
-        # 4. Compute losses efficiently using affine relationships
-        # Compute base loss in CRN's prediction space, then apply time-dependent weights
+        # 5. Compute base loss in CRN's prediction space, then apply time-dependent weights
         # for additional loss terms if requested.
         
-
         loss_weight = 0.0
         
         # Compute base squared error in CRN's native prediction space (per point)
@@ -554,8 +568,9 @@ class MnistFlow2D(nn.Module):
                     loss_weight = loss_weight + 1.0
 
         # Sum over spatial dimension first, then apply weight
-        if mask is not None:
-            sq_err = jnp.sum(sq_err * mask, axis=-1) / (jnp.sum(mask, axis=-1) + 1e-10)  # (B, N) -> (B,)
+        # Use point_mask to handle variable-length point clouds (mask out invalid/padding points)
+        if point_mask is not None:
+            sq_err = jnp.sum(sq_err * point_mask, axis=-1) / (jnp.sum(point_mask, axis=-1) + 1e-10)  # (B, N) -> (B,)
         else:
             sq_err = jnp.mean(sq_err, axis=-1)  # (B, N) -> (B,)
         
@@ -574,40 +589,9 @@ class MnistFlow2D(nn.Module):
                 raise ValueError(f"Unknown prediction target: {self.prediction_target}")
 
         flow_loss = jnp.mean(sq_err * loss_weight)  # (B,) * (B,) -> (B,) -> scalar
-
-        
-        # 5. VAE KL: KL(q(z|x) || N(0,I)) - only if use_vae=True
-        if self.use_vae:
-            # Shape depends on encoder type:
-            # - Global: (B, Dc) -> (B,)
-            # - Local: (B, K, Dc) -> (B, K) -> (B,)
-            vae_kl = jnp.exp(logvar_z) + jnp.square(mu_z) - 1.0 - logvar_z            
-            vae_kl = 0.5*jnp.mean(vae_kl)
-        else:
-            vae_kl = 0.0
-        
-        # 5b. Marginal KL: KL(p(z) || N(0,I)) where p(z) = E_x[q(z|x)]
-        # This ensures the marginal distribution of z is unit normal
-        # Compute this even when use_vae=False to encourage unit normal marginals
-        # Compute empirical mean and variance of z in batch
-        # z shape: (B, D) for global, (B, K, D) for local
-        if z.ndim == 3:
-            # Local: average over batch and K
-            z_mean_empirical = jnp.mean(z, axis=(0, 1))  # (D,)
-            z_var_empirical = jnp.var(z, axis=(0, 1))    # (D,)
-        else:
-            # Global: average over batch
-            z_mean_empirical = jnp.mean(z, axis=0)  # (D,)
-            z_var_empirical = jnp.var(z, axis=0)    # (D,)
-        
-        # KL divergence: KL(N(μ_emp, σ²_emp) || N(0, I))
-        # = 0.5 * [tr(Σ) + μ^T μ - D - log|Σ|]
-        # where Σ is diagonal with σ²_emp
-        
-        marginal_kl = (z_var_empirical + z_mean_empirical**2 - 1.0 - jnp.log(z_var_empirical + 1e-8))
-        marginal_kl = 0.5 * jnp.mean(marginal_kl)
         
         # 6. Prior Flow (optional) - only compute if needed for gradients
+        prior_flow_loss = 0.0
         if self.use_prior_flow and compute_prior_loss:
             # Train prior flow: mu_z -> N(0, I)
             # Use AdaLNLatentFlow which takes (mu_z, t) directly
@@ -651,48 +635,52 @@ class MnistFlow2D(nn.Module):
             else:
                 loss = flow_loss + prior_flow_loss + self.vae_kl_weight * vae_kl + self.marginal_kl_weight * marginal_kl
             
-            metrics = {"flow_loss": flow_loss, 
-                      "prior_flow_loss": prior_flow_loss, 
-                      "vae_kl": vae_kl,
-                      "marginal_kl": marginal_kl}
         elif self.use_prior_flow and not compute_prior_loss:
             # Prior flow is enabled but we're not computing loss (prior is frozen)
             loss = flow_loss + self.vae_kl_weight * vae_kl + self.marginal_kl_weight * marginal_kl
-            metrics = {"flow_loss": flow_loss, 
-                      "prior_flow_loss": 0.0,  # Set to 0 to indicate it wasn't computed
-                      "vae_kl": vae_kl,
-                      "marginal_kl": marginal_kl}
         else:
             loss = flow_loss + self.vae_kl_weight * vae_kl + self.marginal_kl_weight * marginal_kl
-            metrics = {"flow_loss": flow_loss, "vae_kl": vae_kl, "marginal_kl": marginal_kl}
         
+        metrics = {"flow_loss": flow_loss, 
+                    "prior_flow_loss": prior_flow_loss,  # Set to 0 to indicate it wasn't computed
+                    "vae_kl": vae_kl,
+                    "marginal_kl": marginal_kl}
         return loss, metrics
     
     def sample(self, num_points: int, key: jax.random.PRNGKey,
-               z: Optional[jnp.ndarray] = None, num_steps: int = 20) -> jnp.ndarray:
+               z: Optional[jnp.ndarray] = None, num_steps: int = 20,
+               batch_size: Optional[int] = None) -> jnp.ndarray:
         """
         Sample points by integrating the flow from t=1 (noise) to t=0 (data).
         
         Args:
-            num_points: Number of points to sample
+            num_points: Number of points to sample per batch element
             key: Random key
             z: Optional latent code (if None, sample from prior)
+                - If provided, can have shape (B, D) for global or (B, K, D) for local
+                - If None, samples from prior (batch size determined by batch_size parameter)
             num_steps: Number of integration steps
+            batch_size: Optional batch size when z=None. If None and z=None, defaults to 1.
+                       Ignored if z is provided (uses z's batch size instead).
         
         Returns:
-            Sampled points, shape (num_points, spatial_dim)
+            Sampled points:
+            - If batch size B > 1: returns (B, num_points, spatial_dim)
+            - If batch size B == 1: returns (num_points, spatial_dim)
         """
         if z is None:
+            # Determine batch size: use batch_size parameter or default to 1
+            B = batch_size if batch_size is not None else 1
+            
             if self.use_prior_flow:
-                # Sample from learned prior using GlobalAdaLNMLPCRN
+                # Sample from learned prior using AdaLNLatentFlow
                 key, k_prior = jax.random.split(key)
                 if self._encoder_is_global:
-                    z_prior_noise = jax.random.normal(k_prior, (1, self.latent_dim))
+                    z_prior_noise = jax.random.normal(k_prior, (B, self.latent_dim))
                 else:
                     # For local encoders, need to know K
                     # TODO: Make this configurable
-                    K = 8  # Default
-                    z_prior_noise = jax.random.normal(k_prior, (1, K, self.latent_dim))
+                    z_prior_noise = jax.random.normal(k_prior, (B, self.num_latents, self.latent_dim))
                 
                 dt_prior = -1.0 / num_steps
                 
@@ -700,11 +688,14 @@ class MnistFlow2D(nn.Module):
                     t = 1.0 + step_idx * dt_prior
                     
                     # AdaLNLatentFlow takes (z, t) directly - no context needed
-                    # t should be scalar for single sample
-                    t_scalar = t if isinstance(t, (int, float)) else (t[0] if t.ndim > 0 else t)
-                    t_batch = jnp.array([t_scalar])  # (1,)
+                    # Handle batch dimension: t should match z's batch dimension
+                    B_current = z_t.shape[0]
+                    if B_current == 1:
+                        t_batch = jnp.array([t])  # (1,)
+                    else:
+                        t_batch = jnp.full((B_current,), t)  # (B,)
                     
-                    v = self.prior_vector_field(z_t, t_batch)  # (1, D) or (1, K, D)
+                    v = self.prior_vector_field(z_t, t_batch)  # (B, D) or (B, K, D)
                     
                     return z_t + dt_prior * v, None
                 
@@ -712,34 +703,46 @@ class MnistFlow2D(nn.Module):
             else:
                 # Sample from standard normal
                 if self._encoder_is_global:
-                    z = jax.random.normal(key, (1, self.latent_dim))
+                    z = jax.random.normal(key, (B, self.latent_dim))
                 else:
                     K = 8  # Default
-                    z = jax.random.normal(key, (1, K, self.latent_dim))
+                    z = jax.random.normal(key, (B, K, self.latent_dim))
 
-        z_sample = z/jnp.sqrt(jnp.sum(z**2, axis=-1, keepdims=True) + 1e-8)
+        # Normalize z to unit vector
+        if self.normalize_z:
+            z = z / jnp.sqrt(jnp.sum(z**2, axis=-1, keepdims=True) + 1e-8)
         
-        # Initialize from noise
+        # Determine batch size from z
+        B = z.shape[0]
+        
+        # Initialize from noise (match batch size of z)
         key, k_points = jax.random.split(key)
-        x_init = jax.random.normal(k_points, (1, num_points, self.spatial_dim))
-        
+        x_init = jax.random.normal(k_points, (B, num_points, self.spatial_dim))
+        t_init = 1.0
         # Integrate from t=1 to t=0
         dt = -1.0 / num_steps
         
         def euler_step(x_t, step_idx):
             t = 1.0 + step_idx * dt
+            # Broadcast t to batch dimension
+            t_batch = jnp.full((B,), t) if B > 1 else t
+            
             # Get CRN output
             if self._encoder_is_global:
-                crn_output = self.crn(x_t, z_sample, t)
+                crn_output = self.crn(x_t, z, t_batch)
             else:
-                crn_output = self.crn(x_t, z_sample, t)
+                crn_output = self.crn(x_t, z, t_batch)
             
             # Convert CRN output to velocity for Euler integration
             # The CRN may predict velocity, noise, or target - we need velocity for integration
-            v = self.convert_crn_output_to_velocity(crn_output, x_t, t)
+            v = self.convert_crn_output_to_velocity(crn_output, x_t, t_batch)
             
             return x_t + dt * v, None
         
         x_final, _ = jax.lax.scan(euler_step, x_init, jnp.arange(num_steps))
         
-        return x_final[0]
+        # Return shape: (B, num_points, spatial_dim) if B > 1, else (num_points, spatial_dim)
+        if B == 1:
+            return x_final[0]  # Remove batch dimension for single sample
+        else:
+            return x_final  # Keep batch dimension for batch sampling

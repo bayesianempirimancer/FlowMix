@@ -51,3 +51,4 @@ def create_tsne_plot(z_all, labels, output_path):
     print(f"Saved t-SNE plot to {output_path}")
     plt.close()
 
+

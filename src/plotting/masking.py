@@ -31,13 +31,13 @@ def visualize_masked_digits(X, create_grid_mask_fn: Callable, output_dir: Path,
     # Generate grid mask
     key = jax.random.PRNGKey(seed)
     key, k_mask = jax.random.split(key)
-    encoder_mask = create_grid_mask_fn(x_batch, k_mask, grid_size=grid_size, mask_prob=mask_prob)
+    mask = create_grid_mask_fn(x_batch, k_mask, grid_size=grid_size, mask_prob=mask_prob)
     
     # Create masked version (set masked points to NaN for visualization)
     x_masked = x_batch.copy()
     x_masked = np.array(x_masked)  # Convert to numpy for easier manipulation
-    encoder_mask_np = np.array(encoder_mask)
-    x_masked[~encoder_mask_np] = np.nan  # Set masked points to NaN
+    mask_np = np.array(mask)
+    x_masked[~mask_np] = np.nan  # Set masked points to NaN
     
     # Create visualization
     n_cols = 4
@@ -63,12 +63,12 @@ def visualize_masked_digits(X, create_grid_mask_fn: Callable, output_dir: Path,
         ax_masked = axes[i * 2 + 1]
         x_m = x_masked[i]  # (N, 2)
         # Plot visible points
-        visible_mask = encoder_mask_np[i]
+        visible_mask = mask_np[i]
         if np.any(visible_mask):
             ax_masked.scatter(x_m[visible_mask, 0], x_m[visible_mask, 1], 
                             s=1, c='black', alpha=0.6, label='Visible')
         # Plot masked points (if any are not NaN)
-        masked_mask = ~encoder_mask_np[i]
+        masked_mask = ~mask_np[i]
         if np.any(masked_mask):
             # Show masked regions as red points or gray
             masked_points = x_batch[i][masked_mask]

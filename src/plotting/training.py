@@ -85,9 +85,11 @@ def plot_samples(model, variables, X_test, output_dir, num_samples=16):
         # Sample point cloud conditioned on z
         sample = model.apply(
             variables,
-            num_points=500,
-            key=k_sample,
-            z=z,
+            500,  # num_points
+            k_sample,  # key
+            z,  # z
+            20,  # num_steps
+            None,  # batch_size (ignored since z is provided)
             method=model.sample
         )
         conditional_samples.append(np.array(sample))
@@ -100,9 +102,11 @@ def plot_samples(model, variables, X_test, output_dir, num_samples=16):
         # Sample z from N(0,I) and generate
         sample = model.apply(
             variables,
-            num_points=500,
-            key=k_sample,
-            z=None,  # Will sample z from N(0,I)
+            500,  # num_points
+            k_sample,  # key
+            None,  # z (will sample from prior)
+            20,  # num_steps
+            1,  # batch_size (single sample)
             method=model.sample
         )
         unconditional_samples.append(np.array(sample))

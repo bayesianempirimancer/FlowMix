@@ -64,3 +64,4 @@ def create_crn(
             raise ValueError(f"CRN type {crn_type} not supported for local encoders. "
                            f"Supported types: 'adaln_mlp', 'cross_attention'")
 
+

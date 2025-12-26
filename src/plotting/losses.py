@@ -73,3 +73,4 @@ def plot_loss_trajectory(loss_history, chamfer_history, flow_loss_history,
     plt.close()
     print(f"✓ Saved loss trajectory to {loss_path}")
 
+

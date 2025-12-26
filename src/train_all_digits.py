@@ -158,20 +158,24 @@ def train_step(model, params, opt_state, x_batch, key, optimizer, update_prior_o
         grid_size: Size of the grid for masking (default 4).
         mask_prob: Probability of masking each grid cell (default 0.2).
     """
-    # Generate grid mask for encoder if enabled
-    encoder_mask = None
+    # Generate encoder mask if enabled (for grid masking)
+    enc_mask = None
     if use_grid_mask:
         key, k_mask = jax.random.split(key)
-        encoder_mask = create_grid_mask(x_batch, k_mask, grid_size=grid_size, mask_prob=mask_prob)
+        enc_mask = create_grid_mask(x_batch, k_mask, grid_size=grid_size, mask_prob=mask_prob)
+    
+    # point_mask is None for now (all point clouds have same number of points)
+    # In the future, this can be used for variable-length point clouds
+    point_mask = None
     
     def loss_fn(p):
         # Skip prior flow loss computation if prior is frozen (no gradients needed)
         compute_prior_loss = not freeze_prior
         # In prior_only_mode, exclude flow_loss from total loss since encoder/CRN are frozen
         prior_only_mode = update_prior_only
-        # Pass encoder_mask separately: encoder uses masked points, flow uses full points
-        # mask=None for flow (uses full x), encoder_mask for encoder
-        loss, metrics = model.apply(p, x_batch, key, None, encoder_mask, compute_prior_loss, prior_only_mode, method=model.compute_loss)
+        # Pass enc_mask to encoder (encoder sees masked points when enc_mask is provided, flow uses full x)
+        # Pass point_mask for loss computation (currently None, for variable-length point clouds)
+        loss, metrics = model.apply(p, x_batch, key, enc_mask, point_mask, compute_prior_loss, prior_only_mode, method=model.compute_loss)
         return loss, metrics
     
     (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
@@ -212,13 +216,19 @@ def train_step(model, params, opt_state, x_batch, key, optimizer, update_prior_o
 
 
 def sample_batch(model, params, z_batch, keys_sample, num_points):
-    """Sample a batch of point clouds efficiently using vmap."""
-    def sample_single(z_single, key_single):
-        """Sample for a single latent code."""
-        return model.apply(params, num_points, key_single, z=z_single[None], method=model.sample)
+    """Sample a batch of point clouds efficiently.
     
-    # Vmap over batch dimension
-    x_gen = jax.vmap(sample_single, in_axes=(0, 0))(z_batch, keys_sample)
+    The sample method now handles batch shapes directly, so we can pass z_batch
+    directly without vmap. JAX's random number generator automatically produces
+    different noise for each element in the batch.
+    """
+    # z_batch already has batch dimension (B, D) or (B, K, D)
+    # Use a single key - JAX will generate different noise for each batch element
+    key_batch = keys_sample[0] if len(keys_sample) > 0 else jax.random.PRNGKey(0)
+    
+    # Call sample directly with the batch of z values (no vmap needed!)
+    x_gen = model.apply(params, num_points, key_batch, z=z_batch, num_steps=20, batch_size=None, method=model.sample)
+    # x_gen will have shape (B, num_points, spatial_dim)
     return x_gen
 
 
@@ -281,11 +291,15 @@ def main():
         BETA1, BETA2 = 0.9, 0.999
         momentum_suffix = "momentum_default"
     
+    # Configuration for normalize_z (set before output_dir to use in naming)
+    NORMALIZE_Z = False  # Set to True for first run, False for second run
+    
     # Output directory (use a new directory for joint training without VAE, with squash instead of LayerNorm)
+    normalize_suffix = "normalize_z" if NORMALIZE_Z else "no_normalize_z"
     if USE_GRID_MASK:
-        output_dir = Path(f"artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_squash_gridmask_{momentum_suffix}")
+        output_dir = Path(f"artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_squash_{normalize_suffix}_gridmask_{momentum_suffix}")
     else:
-        output_dir = Path(f"artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_squash_{momentum_suffix}")
+        output_dir = Path(f"artifacts/all_digits_pointnet_adaln_velocity_no_vae_prior_flow_joint_squash_{normalize_suffix}_{momentum_suffix}")
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("=" * 80)
@@ -335,6 +349,7 @@ def main():
             'time_embed_dim': 128,  # Time embedding dimension for AdaLN
         },
         optimal_reweighting=False,  # No optimal reweighting
+        normalize_z=NORMALIZE_Z,  # Normalize z to unit vector (set above)
     )
     
     # Determine if we should run two-stage training automatically
