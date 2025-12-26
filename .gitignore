@@ -83,3 +83,4 @@ logs/
 Thumbs.db
 .DS_Store
 
+*.npz
