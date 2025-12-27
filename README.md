@@ -4,7 +4,7 @@ A JAX-based implementation of **Flow Matching** for generating point clouds of a
 
 ## Overview
 
-OC-Flow-Mix implements **Flow Matching** (also known as Continuous Normalizing Flows) for point cloud generation. Unlike diffusion models that require multiple denoising steps, flow matching learns a continuous vector field that directly transports samples from a simple prior distribution to the data distribution. This enables fast, single-pass generation with high-quality results.
+Flow-Mix implements **Flow Matching** (also known as Continuous Normalizing Flows) for point cloud generation. Unlike diffusion models that require multiple denoising steps, flow matching learns a continuous vector field that directly transports samples from a simple prior distribution to the data distribution. This enables fast, single-pass generation with high-quality results.  For simplicity this repo assumes a simple linear transport model to connect the source and target distributions.  
 
 **Key Design Principle**: The architecture is dimension-agnostic. The `spatial_dim` parameter controls the dimensionality of point coordinates (e.g., 2 for 2D, 3 for 3D), while all other components (encoders, CRNs, flow models) operate generically on point clouds of any dimension.
 
@@ -16,12 +16,12 @@ OC-Flow-Mix implements **Flow Matching** (also known as Continuous Normalizing F
   - **Local Encoders**: Transformer Set, DGCNN, Slot Attention, Cross-Attention, GMM Featurizer, and more
 - **Conditional ResNet (CRN) Framework**: Three specialized CRN types optimized for different context structures:
   - **Global CRNs**: Single global conditioning vector
-  - **Local CRNs**: One-to-one point-latent correspondence
-  - **Structured CRNs**: Many points, few abstract latents (pool-based or attention-based)
-- **Optional VAE Mode**: Variational autoencoder support with KL divergence regularization
-- **Prior Flow Learning**: Optional learnable prior distribution using flow models
+  - **Local CRNs**: One-to-one point-latent correspondence as in point transformer models
+  - **Structured CRNs**: Many points, many fewer abstract latents that correspond to 'objects' made of many points
+- **Optional VAE Mode**: Optional KL regularization for latent variabes in the style of a VAE
+- **Prior Flow Learning**: Optional learnable prior distribution over latents (option include a gmm or another flow model)  
 - **Grid Masking**: Training-time masking strategy for improved generalization
-- **Modern Architecture Components**: Pre-normalization, SwiGLU activations, multi-query attention, and more
+- **Modern Architecture Components**: Pre-normalization, SwiGLU activations, multi-query attention, etc.
 
 ## Methodology
 
@@ -38,14 +38,14 @@ During training, we learn to predict the velocity field at any time `t ∈ [0,1]
 - A latent code `z` encoding the target shape
 - The time `t`
 
-### Architecture Pipeline
+### Inference Architecture Pipeline
 
 ```
 Input Point Cloud (B, N, D_spatial)
     ↓
 Encoder (PointNet, Transformer, etc.)
     ↓
-Latent Code z (B, D_latent) or (B, K, D_latent)
+Latent Code z which can be global (B, D_latent) or structured (B, K, D_latent)
     ↓
 Conditional ResNet (CRN)
     ↓
@@ -60,7 +60,7 @@ Where `D_spatial` is the spatial dimension (2 for 2D, 3 for 3D, etc.) and is con
 
 ### Loss Functions
 
-The model supports three equivalent loss formulations:
+The model supports three loss formulations related by an affine transformation:
 
 1. **Velocity Prediction** (standard flow matching):
    ```
@@ -78,7 +78,7 @@ The model supports three equivalent loss formulations:
    L = ||x̂_0 - x_0||²
    ```
 
-All three loss functions are mathematically related via affine transformations and can be used individually or combined for multi-objective training.  This is because, $x_t = x_0*(1-t) + x_1*t$ and $v = x_1 - x_0$.  As a result, different loss functions are related through a time dependent scaling factor.  None-the-less, prediction target can have a big imact, i.e. it is generally more stable to have the network learn to predict velocity rather than noise.  
+All three loss functions are mathematically related via affine transformations and can be used individually or combined for multi-objective training.  This is because, $x_t = x_0*(1-t) + x_1*t$ and $v = x_1 - x_0$.  As a result, different loss functions are related through a time dependent scaling factor.  None-the-less, prediction target can have a big imact, i.e. it is generally more stable to have the network learn to predict velocity rather than noise or target.  
 
 ### Conditional ResNets (CRNs)
 
