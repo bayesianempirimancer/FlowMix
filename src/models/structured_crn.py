@@ -67,25 +67,28 @@ def get_time_embedding(embed_type: str, dim: int) -> nn.Module:
 
 
 # ============================================================================
-# Pool-Based Structured CRNs (K << N)
-# Pool K latents → global conditioning → AdaLN
+# Soft Selection Structured CRNs (K << N)
+# For each of N points, select one of K object embeddings via softmax
 # ============================================================================
 
 class StructuredAdaLNMLPCRN(nn.Module):
     """
     Structured CRN using MLP with Adaptive Layer Normalization (AdaLN).
     
-    **Pattern:** Pool-Based (K << N)
+    **Pattern:** Soft Selection (K << N)
     
     Expects structured context: c has shape (B, K, Dc) where K is the number of
     abstract latent representations (slots, latent queries, mixture components, etc.).
     
-    Pools K latents into a single global conditioning vector, then applies AdaLN.
+    For each of N input points, the network selects one of K object embeddings
+    using a softmax (applied to a function of both context and input), and uses
+    that to generate the output.
     
     Args:
         hidden_dims: Hidden layer dimensions
         time_embed_dim: Dimension for time embedding
         cond_dim: Dimension of conditioning vector
+        selection_dim: Dimension for point-object affinity computation
         position_embed_type: Type of positional embedding for x
         activation_fn: Name of activation function
     """
@@ -93,6 +96,7 @@ class StructuredAdaLNMLPCRN(nn.Module):
     time_embed_dim: int = 32
     time_embed_type: str = 'sinusoidal'
     cond_dim: int = 128
+    selection_dim: int = 64  # Dimension for computing point-object affinity
     position_embed_type: str = 'linear'
     activation_fn: str = 'swish'
     
@@ -131,28 +135,9 @@ class StructuredAdaLNMLPCRN(nn.Module):
         
         activation = get_activation_fn(self.activation_fn)
         
-        # Build conditioning from structured context and time
+        # Build time embedding
         time_embed = get_time_embedding(self.time_embed_type, self.time_embed_dim)
         t_feat = time_embed(t)  # (B, time_embed_dim)
-        
-        # Broadcast time to all K latent representations
-        K = c.shape[1]
-        t_feat = t_feat[:, None, :]  # (B, 1, time_embed_dim)
-        t_feat = jnp.broadcast_to(t_feat, (B, K, self.time_embed_dim))  # (B, K, time_embed_dim)
-        
-        # Concatenate time and structured context
-        cond = jnp.concatenate([t_feat, c], axis=-1)  # (B, K, time_embed_dim + Dc)
-        cond = nn.swish(nn.Dense(self.cond_dim)(cond))
-        cond = nn.swish(nn.Dense(self.cond_dim)(cond))  # (B, K, cond_dim)
-        
-        # Apply mask to conditioning if provided
-        if mask is not None:
-            mask_expanded = mask[:, :, None]  # (B, K, 1)
-            cond = cond * mask_expanded
-        
-        # Pool K structured latents into single global conditioning vector
-        # Use max pooling to aggregate information from all K latents
-        cond = jnp.max(cond, axis=1)  # (B, cond_dim)
         
         # Handle 2D input (add spatial dimension)
         squeeze_output = False
@@ -160,43 +145,89 @@ class StructuredAdaLNMLPCRN(nn.Module):
             x = x[:, None, :]  # (B, D) -> (B, 1, D)
             squeeze_output = True
         
+        B, N, D = x.shape
+        K = c.shape[1]
+        
         # Positional embedding for x
         if self.position_embed_type == 'linear':
-            h = nn.Dense(self.hidden_dims[0])(x)
+            x_embed = nn.Dense(self.hidden_dims[0])(x)  # (B, N, hidden_dims[0])
         elif self.position_embed_type == 'sinusoidal':
             pos_embed = PositionalEmbedding2D(dim=self.hidden_dims[0])
-            h = pos_embed(x)
+            x_embed = pos_embed(x)  # (B, N, hidden_dims[0])
         elif self.position_embed_type == 'fourier':
             pos_embed = PositionalEmbedding2D(dim=self.hidden_dims[0], fourier=True)
-            h = pos_embed(x)
+            x_embed = pos_embed(x)  # (B, N, hidden_dims[0])
         else:
             raise ValueError(f"Unknown position_embed_type: {self.position_embed_type}")
         
+        # Project points to selection space
+        point_features = nn.Dense(self.selection_dim)(x_embed)  # (B, N, selection_dim)
+        point_features = activation(point_features)
+        
+        # Project object embeddings to selection space
+        # First, add time to object embeddings
+        t_feat_expanded = t_feat[:, None, :]  # (B, 1, time_embed_dim)
+        t_feat_expanded = jnp.broadcast_to(t_feat_expanded, (B, K, self.time_embed_dim))  # (B, K, time_embed_dim)
+        
+        # Concatenate time with object embeddings
+        c_with_time = jnp.concatenate([t_feat_expanded, c], axis=-1)  # (B, K, time_embed_dim + Dc)
+        object_features = nn.Dense(self.selection_dim)(c_with_time)  # (B, K, selection_dim)
+        object_features = activation(object_features)
+        
+        # Apply mask to object features if provided
+        if mask is not None:
+            mask_expanded = mask[:, :, None]  # (B, K, 1)
+            object_features = object_features * mask_expanded
+        
+        # Compute affinity between each point and each object embedding
+        # point_features: (B, N, selection_dim)
+        # object_features: (B, K, selection_dim)
+        # Compute dot product similarity
+        affinity = jnp.einsum('bnd,bkd->bnk', point_features, object_features)  # (B, N, K)
+        
+        # Apply mask to affinity scores (set masked objects to -inf before softmax)
+        if mask is not None:
+            mask_expanded = mask[:, None, :]  # (B, 1, K)
+            affinity = jnp.where(mask_expanded > 0.5, affinity, -1e9)
+        
+        # Softmax over K dimension to get selection weights
+        selection_weights = nn.softmax(affinity, axis=-1)  # (B, N, K)
+        
+        # Build conditioning from structured context and time
+        # Process object embeddings with time
+        cond_objects = nn.swish(nn.Dense(self.cond_dim)(c_with_time))  # (B, K, cond_dim)
+        cond_objects = nn.swish(nn.Dense(self.cond_dim)(cond_objects))  # (B, K, cond_dim)
+        
+        # Apply mask to conditioning objects if provided
+        if mask is not None:
+            mask_expanded = mask[:, :, None]  # (B, K, 1)
+            cond_objects = cond_objects * mask_expanded
+        
+        # Weighted combination: for each point, get weighted sum of object embeddings
+        # selection_weights: (B, N, K)
+        # cond_objects: (B, K, cond_dim)
+        # Result: (B, N, cond_dim) - each point gets a weighted combination of object embeddings
+        cond = jnp.einsum('bnk,bkd->bnd', selection_weights, cond_objects)  # (B, N, cond_dim)
+        
+        # Start processing with embedded points
+        h = x_embed
         h = activation(h)
         
-        # MLP with AdaLN conditioning from pooled structured context
+        # MLP with per-point AdaLN conditioning from selected object embeddings
         for dim in self.hidden_dims:
             h = nn.Dense(dim)(h)
             h = activation(h)
             
-            # AdaLN: regress scale/shift from global conditioning (pooled from K latents)
-            scale_shift = nn.Dense(2 * dim)(cond)  # (B, 2*dim)
-            scale, shift = jnp.split(scale_shift, 2, axis=-1)  # Each: (B, dim)
-            
-            # Broadcast to match h: (B, N, dim)
-            scale = scale[:, None, :]
-            shift = shift[:, None, :]
+            # AdaLN: regress scale/shift from per-point conditioning (selected from K objects)
+            # cond: (B, N, cond_dim)
+            scale_shift = nn.Dense(2 * dim)(cond)  # (B, N, 2*dim)
+            scale, shift = jnp.split(scale_shift, 2, axis=-1)  # Each: (B, N, dim)
             
             h = nn.LayerNorm()(h)
             h = h * (1 + scale) + shift
         
         # Output projection
         dx = nn.Dense(x.shape[-1], kernel_init=nn.initializers.zeros)(h)
-        
-        # Apply mask to output if provided
-        if mask is not None and not squeeze_output:
-            # For pool-based, mask was already applied to conditioning
-            pass
         
         # Remove spatial dimension if input was 2D
         if squeeze_output:

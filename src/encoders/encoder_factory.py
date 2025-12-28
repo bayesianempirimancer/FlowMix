@@ -9,10 +9,10 @@ from typing import Tuple, Literal, Optional, Dict, Any
 # Encoders
 from src.encoders.global_encoders.pointnet import PointNetEncoder
 from src.encoders.local_encoders.transformer_set import TransformerSetEncoder
-from src.encoders.local_encoders.slot_attention_encoder import SlotAttentionEncoder
-from src.encoders.local_encoders.cross_attention_encoder import CrossAttentionEncoder
-from src.encoders.local_encoders.gmm_featurizer import GMMFeaturizer
 from src.encoders.local_encoders.dgcnn import DGCNN
+from src.encoders.structured_encoders.slot_attention_encoder import SlotAttentionEncoder
+from src.encoders.structured_encoders.cross_attention_encoder import CrossAttentionEncoder
+from src.encoders.structured_encoders.gmm_featurizer import GMMFeaturizer
 
 # Pooling strategies to convert local -> global
 from src.encoders.global_encoders.pooling import (
